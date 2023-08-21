@@ -656,5 +656,6 @@ void setup() {
 
 // не используемый основной цикл
 void loop() {
+
   vTaskDelete(NULL);   // удаляем не нужную задачу loop()  
 }
