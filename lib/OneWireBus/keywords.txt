@@ -1,0 +1,43 @@
+#######################################
+# Syntax Coloring Map For OneWireBus
+#######################################
+
+#######################################
+# Datatypes (KEYWORD1)
+#######################################
+
+OneWireBusClass		KEYWORD1
+OWB_Mode_t			KEYWORD1
+APH_Mode_t
+
+#######################################
+# Methods and Functions (KEYWORD2)
+#######################################
+
+OneWireBusClass		KEYWORD2
+~OneWireBusClass	KEYWORD2
+InitializeBus		KEYWORD2
+HasData				KEYWORD2
+SendData			KEYWORD2
+GetData				KEYWORD2
+ISRTimerFire		KEYWORD2
+ISRPinFire			KEYWORD2
+ReadyToSend			KEYWORD2
+SetRecievePolitic	KEYWORD2
+GetDropPktCount		KEYWORD2
+onOWB_Timer
+onOWB_Pin
+
+#######################################
+# Constants (LITERAL1)
+#######################################
+
+OneWireBus			LITERAL1
+OWB_NO_PIN			LITERAL1
+BROADCAST_ADDR		LITERAL1
+PACKET_OVERHEAD		LITERAL1
+OWB_MAX_SPEED		LITERAL1
+OWB_DEFAULT_SPEED	LITERAL1
+OWB_MIN_SPEED		LITERAL1
+OWB_Mux				LITERAL1
+
