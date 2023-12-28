@@ -78,12 +78,13 @@ MQTT соединения нет, то периодически пытаемся
 #define LED_UV_LIGHT_PIN 12                     // пин подключения PWM управления для UV подсветки
 
 // определяем константы для задержек
-#define C_VU_DELAY 5000                         // задержка включения стрелочек после подачи питания
-#define C_AMBIENT_CHECK_DELAY 5000              // через сколько миллисекунд проверять датчик внешней освещенности
-#define C_BRIGHTNESS_SET_DELAY 100              // задержка для плавного изменения яркости от текущей до заданной
-#define C_WIFI_CONNECT_TIMEOUT 30000            // задержка для установления WiFi соедтинения
-#define C_WIFI_AP_WAIT 60000                    // таймуат поднятой AP без соединения с клиентами (после этого опять пытаемся подключится как клиент)
-#define C_WIFI_CYCLE_WAIT 180000                // таймуат цикла переустановки соединения с WiFi
+#define C_VU_DELAY 5000                         // задержка включения стрелочек после подачи питания (5 сек)
+#define C_AMBIENT_CHECK_DELAY 5000              // через сколько миллисекунд проверять датчик внешней освещенности (5 сек)
+#define C_BRIGHTNESS_SET_DELAY 100              // задержка для плавного изменения яркости от текущей до заданной (0,1 сек)
+#define C_WIFI_CONNECT_TIMEOUT 30000            // задержка для установления WiFi соединения (30 сек)
+#define C_MQTT_CONNECT_TIMEOUT 10000            // задержка для установления MQTT соединения (10 сек)
+#define C_WIFI_AP_WAIT 180000                   // таймуат поднятой AP без соединения с клиентами (после этого опять пытаемся подключится как клиент) (180 сек)
+#define C_WIFI_CYCLE_WAIT 10000                 // таймуат цикла переустановки соединения с WiFi (10 сек)
 
 // определяем константы для уровней сигнала
 #define C_MAX_PWM_VALUE 1000                    // максимальное значение яркости при регулировании подсветки
@@ -286,6 +287,7 @@ void CheckAndUpdateEEPROM() {
 void wifiTask(void *pvParam) {
   // задача установления и поддержания WiFi соединения  
   uint32_t StartWiFiCycle = 0;                // стартовый момент цикла в обработчике WiFi
+  uint32_t StartMQTTCycle = 0;                // стартовый момент цикла подключения к MQTT
   char AP_SSID[21] = "AP_";                   // переменная в которой строим строку с именем WiFi AP 
 
   // перед входом в цикл вычисляем общие константы и устанавливаем правильный статус контроллера
@@ -299,65 +301,90 @@ void wifiTask(void *pvParam) {
       WiFi.persistent(false);
       WiFi.mode(WIFI_STA);
       WiFi.disconnect();
-#ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода
+      #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода
       Serial.print("Try to connect WiFi: ");
       Serial.print(curConfig.wifi_ssid);
       Serial.print("[");
-#endif
+      #endif
       StartWiFiCycle = millis();
       // изначально пытаемся подключится в качестве клиента к существующей сети с грантами из конфигурации
       WiFi.begin(curConfig.wifi_ssid,curConfig.wifi_pwd);
       while ((! WiFi.isConnected()) && (millis() - StartWiFiCycle < C_WIFI_CONNECT_TIMEOUT)) { // ожидаем соединения с необходимой WiFi сеткой
-        vTaskDelay(pdMS_TO_TICKS(1000)); 
-#ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода
+        vTaskDelay(pdMS_TO_TICKS(1000)); // рисуем точку каждую секунду
+        #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода
         Serial.print(".");
-#endif
+        #endif
       } 
-#ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода
+      #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода
       Serial.println("]");
-#endif    
+      #endif    
       // цикл окончен, проверяем соеденились или нет
       if (WiFi.isConnected())  s_CurrentWIFIMode = WF_CLIENT;       // если да - мы соеденились в режиме клиента
         else s_CurrentWIFIMode = WF_AP;                             // соеденится как клиент не смогли - нужно поднимать точку доступа
-#ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+      #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
       if (WiFi.isConnected()) Serial.println("Connected.");
         else Serial.println("Fail.");
-#endif    
+      #endif    
       break;
     case WF_OFF:   
-      // WiFi принудительно выключен  при получении ошибок при работе с WIFI - + выключение режима ESP.NOW  
+      // WiFi принудительно выключен при получении ошибок при работе с WIFI 
+      mqttClient.disconnect(true);                             // принудительно отсоединяемся от MQTT 
       WiFi.persistent(false);
       WiFi.disconnect();
       vTaskDelay(pdMS_TO_TICKS(C_WIFI_CYCLE_WAIT));                 // ждем цикл перед еще одной проверкой
+      s_CurrentWIFIMode = WF_UNKNOWN;                               // уходим на пересоединение с WIFI
       break;    
     case WF_CLIENT:
       // включение WIFI в режиме клиента 
-
-      // TODO:  мы в WiFi сетке, и теперь нужно начать процесс подключения к MQTT серверу
-      
+      #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода
+      Serial.print("Try to connect MQTT: ");
+      Serial.print("  MQTT addr: "); Serial.print(curConfig.mqtt_host[0]); Serial.print("."); Serial.print(curConfig.mqtt_host[1]); Serial.print("."); Serial.print(curConfig.mqtt_host[2]); Serial.print("."); Serial.println(curConfig.mqtt_host[3]); 
+      Serial.print("[");
+      #endif     
+      s_CurrentWIFIMode = WF_MQTT;
       break;    
     case WF_MQTT:
       // соединение с MQTT сервером
-      
-      // TODO:  соединение с MQTT сервером
-
+      StartMQTTCycle = millis();
+      // пытаемся подключится к MQTT серверу в качестве клиента
+      mqttClient.connect();
+      while ((!mqttClient.connected()) && (millis() - StartMQTTCycle < C_MQTT_CONNECT_TIMEOUT)) { // ожидаем соединения с MQTT сервером
+        vTaskDelay(pdMS_TO_TICKS(1000)); 
+        #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода
+        Serial.print(".");
+        #endif
+      } 
+      #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода
+      Serial.println("]");
+      #endif    
+      // цикл окончен, проверяем есть ли соединение с MQTT
+      if (mqttClient.connected())  s_CurrentWIFIMode = WF_IN_WORK;       // если да - то пеерходим в режим нормальной работы
+        else s_CurrentWIFIMode = WF_AP;                                  // иначе - уходим в режим AP проблема с окружением или конфигурацией - нужно поднимать точку доступа
       break;    
     case WF_IN_WORK:  // состояние в котором ничего не делаем, так как все нужные соединения установлены
+      if (!mqttClient.connected() or !WiFi.isConnected()) {              // проверяем, что соединения всё еще есть. Если они пропали, делаем таймаут на цикл C_WIFI_CYCLE_WAIT и переустанавливаем соединение
+        #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода
+        if (!mqttClient.connected()) Serial.println("MQTT connetion lost.");
+        if (!WiFi.isConnected()) Serial.println("WiFi connetion lost.");
+        #endif
+        vTaskDelay(pdMS_TO_TICKS(C_WIFI_CYCLE_WAIT)); 
+        s_CurrentWIFIMode = WF_OFF;                                      // уходим на пересоединение с WIFI
+      }
       break;    
     case WF_AP:
       // поднятие собственной точки доступа со страничкой настройки      
       WiFi.persistent(false);
       WiFi.mode(WIFI_AP);
       WiFi.disconnect();      
-#ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+      #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
       Serial.print("Create AP with SSID: ");
       Serial.println(AP_SSID);
-#endif    
+      #endif    
       if (WiFi.softAP(AP_SSID,NULL,def_WiFi_Channel)) {     // собственно создаем точку доступа на дефолтном канале
-#ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+        #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
         Serial.print("AP created with IP: ");
         Serial.println(WiFi.softAPIP());
-#endif 
+        #endif 
         // если точку доступа удалось поднять, то даем ей работать до тех пор пока не кончился таймаут C_WIFI_AP_WAIT, или есть коннекты к точке доступа  
         while ((WiFi.softAPgetStationNum()>0) && (millis() - StartWiFiCycle < C_WIFI_AP_WAIT)) {
           
@@ -392,7 +419,7 @@ void oneWireTask(void *pvParam) {
 // ================================== основные задачи времени выполнения =================================
 
 void getCommandTask (void *pvParam) {
-// задача получения команды от датчика, таймера, MQTT, ESP.NOW, 1Wire, кнопок
+// задача получения команды от датчика, таймера, MQTT, OneWire, кнопок
   while (true) {
 
     vTaskDelay(1/portTICK_PERIOD_MS); 
