@@ -36,10 +36,14 @@ MQTT соединения нет, то периодически пытаемся
 */
 
 #include <Arduino.h>
-#include <WiFi.h>
 #include <EEPROM.h>
+
 #include "GyverButton.h"
 #include <OneWireBus.h>
+
+#include <WiFi.h>
+#include <AsyncMqttClient.h>
+#include <ArduinoJson.h>
 
 // устанавливаем режим отладки
 #define DEBUG_LEVEL_PORT                        // устанавливаем режим отладки через порт
@@ -180,6 +184,9 @@ GButton bttn_power(BTTN_POWER_PIN, HIGH_PULL, NORM_OPEN);                       
 GButton bttn_input(BTTN_SELECTOR_PIN, HIGH_PULL, NORM_OPEN);                              // инициализируем кнопку выбора входа
 GButton bttn_light(BTTN_UV_LIGHT_PIN, HIGH_PULL, NORM_OPEN);                              // инициализируем кнопку переключения освещением
 
+// объявляем объект MQTT клиент 
+AsyncMqttClient   mqttClient;                  // MQTT клиент
+
 // =============================== общие процедуры и функции ==================================
 
 uint16_t GetCrc16Simple( uint8_t * data, uint16_t len ) {
@@ -275,7 +282,7 @@ void CheckAndUpdateEEPROM() {
 
 // ========================= вспомогательные задачи времени выполнения ===================================
 
-void IRAM_ATTR wifiTask(void *pvParam) {
+void wifiTask(void *pvParam) {
   // задача установления и поддержания WiFi соединения  
   uint32_t StartWiFiCycle = 0;                // стартовый момент цикла в обработчике WiFi
   char AP_SSID[21] = "AP_";                   // переменная в которой строим строку с именем WiFi AP 
@@ -327,16 +334,11 @@ void IRAM_ATTR wifiTask(void *pvParam) {
 
       // TODO:  мы в WiFi сетке, и теперь нужно начать процесс подключения к MQTT серверу
       
-        Serial.println("Можно коннектится к MQTT!!!");    
-        vTaskDelay(1/portTICK_PERIOD_MS); 
-
-
       break;    
     case  WF_MQTT:
       // соединение с MQTT сервером
       
       // TODO:  соединение с MQTT сервером
-        vTaskDelay(1/portTICK_PERIOD_MS); 
 
       break;    
     case WF_AP:
@@ -371,18 +373,11 @@ void IRAM_ATTR wifiTask(void *pvParam) {
     }
     // запоминаем точку конца цикла
     StartWiFiCycle = millis();
+    vTaskDelay(1/portTICK_PERIOD_MS); 
   }  
 }
 
-void IRAM_ATTR mqttTask(void *pvParam) {
-// задача установления и поддержания соединения с MQTT сервером поверх WiFi коннекта
-  while (true) {
-
-    vTaskDelay(1/portTICK_PERIOD_MS); 
-  }
-}
-
-void IRAM_ATTR oneWireTask(void *pvParam) {
+void oneWireTask(void *pvParam) {
 // задача по поддержанию работы через шину 1Wire BUS
   while (true) {
 
@@ -391,10 +386,9 @@ void IRAM_ATTR oneWireTask(void *pvParam) {
   }
 }
 
-
 // ================================== основные задачи времени выполнения =================================
 
-void IRAM_ATTR getCommandTask (void *pvParam) {
+void getCommandTask (void *pvParam) {
 // задача получения команды от датчика, таймера, MQTT, ESP.NOW, 1Wire, кнопок
   while (true) {
 
@@ -403,7 +397,7 @@ void IRAM_ATTR getCommandTask (void *pvParam) {
   }
 }
 
-void IRAM_ATTR applayChangesTask (void *pvParam) {
+void applayChangesTask (void *pvParam) {
 // применяем изменений, и если нужно сохранение состояния в FLASH памяти
   while (true) {
     
@@ -412,7 +406,7 @@ void IRAM_ATTR applayChangesTask (void *pvParam) {
   }
 }
 
-void IRAM_ATTR sendCommandTask (void *pvParam) {
+void sendCommandTask (void *pvParam) {
 // шлем команду по 1WireBUS и ESP.NOW
   while (true) {
     
@@ -421,7 +415,7 @@ void IRAM_ATTR sendCommandTask (void *pvParam) {
   }
 }
 
-void IRAM_ATTR reportTask (void *pvParam) {
+void reportTask (void *pvParam) {
 // репортим о текущем состоянии в MQTT и если отладка то и в Serial
   while (true) {
     
@@ -430,6 +424,116 @@ void IRAM_ATTR reportTask (void *pvParam) {
   }
 }
 
+/*
+// -------------------------- в этом фрагменте описываем call-back функции MQTT клиента --------------------------------------------
+void onMqttConnect(bool sessionPresent) {   
+
+  xTimerStop(mqttReconnectTimer, 0);                          // останавливаем таймер переподключения к MQTT
+
+  #ifdef DEBUG_IN_SERIAL                                    
+    Serial.println("Connected to MQTT.");  //  "Подключились по MQTT."
+    Serial.print("Session present: ");  //  "Текущая сессия: "
+    Serial.println(sessionPresent);
+  #endif                
+
+  // далее подписываем ESP32 на набор необходимых для управления топиков:
+  uint16_t packetIdSub = mqttClient.subscribe(SET_TOPIC, 0);  // подписываем ESP32 на топик SET_TOPIC
+
+  #ifdef DEBUG_IN_SERIAL                                      
+    Serial.print("Subscribing at QoS 0, packetId: ");
+    Serial.println(packetIdSub);
+    Serial.print("Topic: ");
+    Serial.println(SET_TOPIC);
+  #endif                  
+
+  mqttClient.publish(LWT_TOPIC, 0, true, "online");           // публикуем в топик LWT_TOPIC событие о своей жизнеспособности
+
+  #ifdef DEBUG_IN_SERIAL                                      
+    Serial.print("Publishing LWT state in [");
+    Serial.print(LWT_TOPIC); 
+    Serial.println("]. QoS 0. "); 
+  #endif                    
+  
+}
+
+
+void onMqttDisconnect(AsyncMqttClientDisconnectReason reason) {
+  #ifdef DEBUG_IN_SERIAL                                        
+    Serial.println("Disconnected from MQTT.");                      // если отключились от MQTT
+  #endif                               
+  if (WiFi.isConnected()) {
+    xTimerStart(mqttReconnectTimer, 0);                 // запускаем таймер переподключения к MQTT
+  }
+  // зажигаем индикаторный светодиод при обрыве связи  с MQTT
+  digitalWrite(PIN_LED_IND, HIGH);                      // включение через подачу 1
+}
+
+void onMqttSubscribe(uint16_t packetId, uint8_t qos) {
+  #ifdef DEBUG_IN_SERIAL   
+    Serial.println("Subscribe acknowledged.");          // подписка подтверждена
+    Serial.print("  packetId: ");                       // 
+    Serial.println(packetId);                           // выводим ID пакета
+    Serial.print("  qos: ");                            // 
+    Serial.println(qos);                                // выводим значение QoS
+  #endif         
+}
+
+void onMqttUnsubscribe(uint16_t packetId) {
+  #ifdef DEBUG_IN_SERIAL     
+    Serial.println("Unsubscribe acknowledged.");        // отписка подтверждена
+    Serial.print("  packetId: ");                       //
+    Serial.println(packetId);                           // выводим ID пакета
+  #endif                     
+}
+
+void onMqttPublish(uint16_t packetId) {
+  #ifdef DEBUG_IN_SERIAL     
+    Serial.println("Publish acknowledged.");            // публикация подтверждена
+    Serial.print("  packetId: ");                       //
+    Serial.println(packetId);                           // выводим ID пакета
+  #endif                     
+}
+
+
+// в этой функции обрабатываем события получения данных в управляющем топике SET_TOPIC
+void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties properties, size_t len, size_t index, size_t total) {
+  String messageTemp;
+
+  #ifdef DEBUG_IN_SERIAL         
+    Serial.print("Get message: [");
+  #endif                         
+
+  for (int i = 0; i < len; i++) {                       // преобразуем полученные в сообщении данные в строку
+    #ifdef DEBUG_IN_SERIAL         
+      Serial.print((char)payload[i]);
+    #endif                         
+    messageTemp += (char)payload[i];
+  }
+  messageTemp[len] = '\0';  
+
+  #ifdef DEBUG_IN_SERIAL         
+    Serial.println("]");
+  #endif                         
+
+  // проверяем, в каком именно топике получено MQTT сообщение
+  if (strcmp(topic, SET_TOPIC) == 0) {
+    // разбираем MQTT сообщение и подготавливаем буфер с изменениями для формирования команд
+    deserializeJson(doc, messageTemp);                  // десерилизуем сообщение и взводим признак готовности к обработке
+    Has_MQTT_Command = true;                            // взводим флаг получения команды по MQTT
+
+  }
+ 
+  #ifdef DEBUG_IN_SERIAL         
+    Serial.println("Publish received.");                //  выводим на консоль данные из топика
+    Serial.print("  topic: ");                          //  "  топик: "
+    Serial.println(topic);                              // название топика 
+    Serial.print("  message: ");                        //  "  сообщение: "
+    Serial.println(messageTemp);                        //  сообщение 
+  #endif                         
+
+}
+
+*/
 
 // =================================== инициализация контроллера и программных модулей ======================================
 
@@ -571,7 +675,22 @@ void setup() {
   }
   
 #endif  
-  
+
+
+  // настраиваем MQTT клиента
+  mqttClient.setCredentials(curConfig.mqtt_usr,curConfig.mqtt_pwd);
+  mqttClient.setServer(curConfig.mqtt_host, curConfig.mqtt_port);
+
+/*  
+  mqttClient.onConnect(onMqttConnect);
+  mqttClient.onDisconnect(onMqttDisconnect);
+  mqttClient.onSubscribe(onMqttSubscribe);
+  mqttClient.onUnsubscribe(onMqttUnsubscribe);
+  mqttClient.onMessage(onMqttMessage);
+  mqttClient.onPublish(onMqttPublish);
+
+*/
+
   // создаем отдельные параллельные задачи, выполняющие группы функций  
   // стартуем основные задачи
   if (xTaskCreate(getCommandTask, "command", 4096, NULL, 1, NULL) != pdPASS) { 
@@ -599,10 +718,6 @@ void setup() {
   if (xTaskCreate(wifiTask, "wifi", 4096*2, NULL, 1, NULL) != pdPASS) { 
     // все плохо, задачу не создали
     Halt("Error: WiFi communication task not created!");
-  }  
-  if (xTaskCreate(mqttTask, "mqtt", 4096, NULL, 1, NULL) != pdPASS) { 
-    // все плохо, задачу не создали
-    Halt("Error: MQTT communication task not created!");
   }  
 
 }
