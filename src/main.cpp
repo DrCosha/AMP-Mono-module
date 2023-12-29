@@ -33,6 +33,12 @@ MQTT соединения нет, то периодически пытаемся
 Для получения команд от MQTT устройства объединяются в группу, которая читает один топик команд.  Свой статус они сообщают в заранее настроенный топик для каждого устройства.
 В качестве параметра команды может быть поднят флаг синхронизации по OneWire
 
+Команды в топике команд:
+
+  {clear_config:true}  - очистить Flash память и загрузится с конфигурацией по умолчанию
+  {reset}              - перезагрузить контроллер управления усилителем 
+  {report}             - сформировать отчет о текущем состоянии в топик REPORT  
+
 */
 
 #include <Arduino.h>
@@ -115,9 +121,9 @@ extern "C" {
 
 // определяем константы для параметров и команд JSON формата в MQTT
 
-#define js_STATE "reset"                        // команда "мягкой" перезагрузки устройства с закрытием соединений
+#define js_RESET "reset"                        // команда "мягкой" перезагрузки устройства с закрытием соединений
 #define js_CLR_CONFIG "clear_config"            // команда очистки текущей конфигурации в EPROM и перезагрузки устройства
-
+#define js_REPORT "report"                      // команда принудительного формирования отчета в топик
 
 // тип описывающий режим работы подсветки индикатора  
 enum VU_mode_t : uint8_t {
@@ -190,7 +196,8 @@ uint32_t tm_LastBrightnessSet = 0;              // последний момен
 uint32_t tm_LastReportToMQTT = 0;               // время последнего отчета в MQTT
 
 // общие флаги программы - команды и изменения 
-bool Has_MQTT_Command = false;                  // флаг получения MQTT команды 
+bool f_HasMQTTCommand = false;                  // флаг получения MQTT команды 
+bool f_HasChanges = false;                      // флаг наличия изменений
 
 // переменные управления яркостью индикатора
 uint16_t  v_CurrAmbient = 0;                    // усредненная величина текущей яркости окружающенго освещения
@@ -454,7 +461,25 @@ void getCommandTask (void *pvParam) {
   while (true) {
 
     //--- обработка событий получения MQTT команд в приложение 
-    if ( Has_MQTT_Command ) { // превращаем события MQTT в команды для отработки приложением    
+    if ( f_HasMQTTCommand ) {                                         // превращаем события MQTT в команды для отработки приложением    
+
+      if (doc.containsKey(js_CLR_CONFIG) and doc[js_CLR_CONFIG])  {   // послана команда обнуления конфигурации
+
+        // TODO: Serial.println("Обнуляем конфиг и перегружаемся");
+
+      }
+
+      if (doc.containsKey(js_RESET) and doc[js_RESET])  {   // послана команда перезагрузки
+
+        // TODO: Serial.println("Перегружаемся");
+
+      }
+
+      if (doc.containsKey(js_REPORT) and doc[js_REPORT])  {   // послана команда принудительного отчета
+
+        // TODO: Serial.println("Готовим отчёт в топик");
+
+      }
 
 /*
   const char* cur_state = doc[js_CLR_CONFIG];
@@ -467,11 +492,13 @@ void getCommandTask (void *pvParam) {
   // обработка тега COLOR_TEMP
   if (strstr(payload,C_COLOR_TEMP) != NULL ) color_temp = map(doc[C_COLOR_TEMP],153, 500, 0, 100);
 */
+
+      f_HasMQTTCommand = false;                                       // сбрасываем флаг наличия изменений через MQTT 
     }
     //--- опрос кнопок - получение команд от лицевой панели 
-    bttn_power.tick();        // опрашиваем кнопку POWER
-    bttn_input.tick();        // опрашиваем кнопку INPUT  
-    bttn_light.tick();        // опрашиваем кнопку LIGHT  
+    bttn_power.tick();                                                // опрашиваем кнопку POWER
+    bttn_input.tick();                                                // опрашиваем кнопку INPUT  
+    bttn_light.tick();                                                // опрашиваем кнопку LIGHT  
     // однократное нажатие на кнопку POWER
     if (bttn_power.isSingle()) {        
 
@@ -480,9 +507,10 @@ void getCommandTask (void *pvParam) {
     }
     // однократное нажатие на кнопку выбора входа
     if (bttn_input.isSingle()) {        
-
-     // TODO: переключаем входы RCA/XLR
-
+      if (s_AmpPowerOn) {                                             // все действия, если усь включен
+        curConfig.inp_selector = !curConfig.inp_selector;
+        f_HasChanges = true;                                          // взводим флаг применения изменений
+      }
     }
     // однократное нажатие на кнопку переключения освещения
     if (bttn_light.isSingle()) {        
@@ -506,8 +534,6 @@ void applayChangesTask (void *pvParam) {
 // применяем изменений, и если нужно сохранение состояния в FLASH памяти
   while (true) {
     
-
-
     if (s_CurrentWIFIMode == WF_IN_WORK ) {  
       // выключаем светодиод установления связи по WiFi и MQTT при нормально установленном соединении
       digitalWrite(LED_POWER_BLUE_PIN,LOW); 
@@ -629,7 +655,11 @@ void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties 
   if (strcmp(topic, curConfig.command_topic) == 0) {
     // разбираем MQTT сообщение и подготавливаем буфер с изменениями для формирования команд    
     deserializeJson(doc, messageTemp);                  // десерилизуем сообщение и взводим признак готовности к обработке
-    Has_MQTT_Command = true;                            // взводим флаг получения команды по MQTT
+    // для коротких сообщений без ключей дополняем DOC объект
+    if (strstr(payload,js_CLR_CONFIG) != NULL ) doc[js_CLR_CONFIG] = true;
+    if (strstr(payload,js_RESET) != NULL ) doc[js_RESET] = true;
+    if (strstr(payload,js_REPORT) != NULL ) doc[js_REPORT] = true;
+    f_HasMQTTCommand = true;                            // взводим флаг получения команды по MQTT
   }
  
   #ifdef DEBUG_LEVEL_PORT         
