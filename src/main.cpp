@@ -165,7 +165,7 @@ bool s_AmpPowerOn = false;                      // режим включения
 bool s_TriggerIn = false;                       // режим включения через триггерный вход
 bool s_EnableEEPROM = false;                    // глобальная переменная разрешения работы с EEPROM
 bool s_VU_Enable = false;                       // разрешение работы стрелочного указателя
-WiFi_mode_t s_CurrentWIFIMode = WF_CLIENT;      // текущий режим работы WiFI
+WiFi_mode_t s_CurrentWIFIMode = WF_UNKNOWN;     // текущий режим работы WiFI
 
 // временные моменты наступления контрольных событий в миллисекундах 
 uint32_t tm_PowerOn = 0;                        // когда включено питание
@@ -297,7 +297,10 @@ void wifiTask(void *pvParam) {
   while (true) {    
     switch (s_CurrentWIFIMode) {
     case WF_UNKNOWN:
+      // включаем индикацию соединения по WiFi
+      digitalWrite(LED_POWER_BLUE_PIN,HIGH);
       // начальное подключение WiFi - сброс всех соединений и новый цикл их поднятия 
+      mqttClient.disconnect(true);                                  // принудительно отсоединяемся от MQTT       
       WiFi.persistent(false);
       WiFi.mode(WIFI_STA);
       WiFi.disconnect();
@@ -328,7 +331,7 @@ void wifiTask(void *pvParam) {
       break;
     case WF_OFF:   
       // WiFi принудительно выключен при получении ошибок при работе с WIFI 
-      mqttClient.disconnect(true);                             // принудительно отсоединяемся от MQTT 
+      mqttClient.disconnect(true);                                  // принудительно отсоединяемся от MQTT 
       WiFi.persistent(false);
       WiFi.disconnect();
       vTaskDelay(pdMS_TO_TICKS(C_WIFI_CYCLE_WAIT));                 // ждем цикл перед еще одной проверкой
@@ -364,8 +367,8 @@ void wifiTask(void *pvParam) {
     case WF_IN_WORK:  // состояние в котором ничего не делаем, так как все нужные соединения установлены
       if (!mqttClient.connected() or !WiFi.isConnected()) {              // проверяем, что соединения всё еще есть. Если они пропали, делаем таймаут на цикл C_WIFI_CYCLE_WAIT и переустанавливаем соединение
         #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода
-        if (!mqttClient.connected()) Serial.println("MQTT connetion lost.");
-        if (!WiFi.isConnected()) Serial.println("WiFi connetion lost.");
+        if (!mqttClient.connected()) Serial.println("MQTT conneсtion lost.");
+        if (!WiFi.isConnected()) Serial.println("WiFi conneсtion lost.");
         #endif
         vTaskDelay(pdMS_TO_TICKS(C_WIFI_CYCLE_WAIT)); 
         s_CurrentWIFIMode = WF_OFF;                                      // уходим на пересоединение с WIFI
@@ -431,8 +434,19 @@ void applayChangesTask (void *pvParam) {
 // применяем изменений, и если нужно сохранение состояния в FLASH памяти
   while (true) {
     
-    vTaskDelay(1/portTICK_PERIOD_MS); 
 
+
+    if (s_CurrentWIFIMode == WF_IN_WORK ) {  
+      // выключаем светодиод установления связи по WiFi и MQTT при нормально установленном соединении
+      digitalWrite(LED_POWER_BLUE_PIN,LOW); 
+    }
+    if (s_CurrentWIFIMode == WF_AP ) {  
+      // включаем мигающий режим светодиода индицирующего работу по WiFi
+
+      // TODO: мигаем
+
+    };
+    vTaskDelay(1/portTICK_PERIOD_MS); 
   }
 }
 
@@ -454,52 +468,46 @@ void reportTask (void *pvParam) {
   }
 }
 
-/*
+
 // -------------------------- в этом фрагменте описываем call-back функции MQTT клиента --------------------------------------------
 void onMqttConnect(bool sessionPresent) {   
 
-  xTimerStop(mqttReconnectTimer, 0);                          // останавливаем таймер переподключения к MQTT
-
-  #ifdef DEBUG_IN_SERIAL                                    
+  #ifdef DEBUG_LEVEL_PORT                                    
     Serial.println("Connected to MQTT.");  //  "Подключились по MQTT."
     Serial.print("Session present: ");  //  "Текущая сессия: "
     Serial.println(sessionPresent);
   #endif                
 
   // далее подписываем ESP32 на набор необходимых для управления топиков:
-  uint16_t packetIdSub = mqttClient.subscribe(SET_TOPIC, 0);  // подписываем ESP32 на топик SET_TOPIC
+  uint16_t packetIdSub = mqttClient.subscribe(curConfig.command_topic, 0);  // подписываем ESP32 на топик SET_TOPIC
 
-  #ifdef DEBUG_IN_SERIAL                                      
+  #ifdef DEBUG_LEVEL_PORT                                      
     Serial.print("Subscribing at QoS 0, packetId: ");
     Serial.println(packetIdSub);
     Serial.print("Topic: ");
-    Serial.println(SET_TOPIC);
+    Serial.println(curConfig.command_topic);
   #endif                  
 
-  mqttClient.publish(LWT_TOPIC, 0, true, "online");           // публикуем в топик LWT_TOPIC событие о своей жизнеспособности
+  // сразу публикуем событие о своей активности
+  mqttClient.publish(curConfig.lwt_topic, 0, true, "online");           // публикуем в топик LWT_TOPIC событие о своей жизнеспособности
 
-  #ifdef DEBUG_IN_SERIAL                                      
+  #ifdef DEBUG_LEVEL_PORT                                      
     Serial.print("Publishing LWT state in [");
-    Serial.print(LWT_TOPIC); 
+    Serial.print(curConfig.lwt_topic); 
     Serial.println("]. QoS 0. "); 
   #endif                    
   
 }
 
-
 void onMqttDisconnect(AsyncMqttClientDisconnectReason reason) {
-  #ifdef DEBUG_IN_SERIAL                                        
+  #ifdef DEBUG_LEVEL_PORT                                                                           
     Serial.println("Disconnected from MQTT.");                      // если отключились от MQTT
-  #endif                               
-  if (WiFi.isConnected()) {
-    xTimerStart(mqttReconnectTimer, 0);                 // запускаем таймер переподключения к MQTT
-  }
-  // зажигаем индикаторный светодиод при обрыве связи  с MQTT
-  digitalWrite(PIN_LED_IND, HIGH);                      // включение через подачу 1
+  #endif         
+  s_CurrentWIFIMode = WF_OFF;                                       // переходим в режим полного реконнекта по WiFi
 }
 
 void onMqttSubscribe(uint16_t packetId, uint8_t qos) {
-  #ifdef DEBUG_IN_SERIAL   
+  #ifdef DEBUG_LEVEL_PORT   
     Serial.println("Subscribe acknowledged.");          // подписка подтверждена
     Serial.print("  packetId: ");                       // 
     Serial.println(packetId);                           // выводим ID пакета
@@ -509,7 +517,7 @@ void onMqttSubscribe(uint16_t packetId, uint8_t qos) {
 }
 
 void onMqttUnsubscribe(uint16_t packetId) {
-  #ifdef DEBUG_IN_SERIAL     
+  #ifdef DEBUG_LEVEL_PORT     
     Serial.println("Unsubscribe acknowledged.");        // отписка подтверждена
     Serial.print("  packetId: ");                       //
     Serial.println(packetId);                           // выводим ID пакета
@@ -517,13 +525,15 @@ void onMqttUnsubscribe(uint16_t packetId) {
 }
 
 void onMqttPublish(uint16_t packetId) {
-  #ifdef DEBUG_IN_SERIAL     
+  #ifdef DEBUG_LEVEL_PORT     
     Serial.println("Publish acknowledged.");            // публикация подтверждена
     Serial.print("  packetId: ");                       //
     Serial.println(packetId);                           // выводим ID пакета
   #endif                     
 }
 
+
+/*
 
 // в этой функции обрабатываем события получения данных в управляющем топике SET_TOPIC
 void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties properties, size_t len, size_t index, size_t total) {
@@ -706,20 +716,16 @@ void setup() {
   
 #endif  
 
-
   // настраиваем MQTT клиента
   mqttClient.setCredentials(curConfig.mqtt_usr,curConfig.mqtt_pwd);
   mqttClient.setServer(curConfig.mqtt_host, curConfig.mqtt_port);
 
-/*  
   mqttClient.onConnect(onMqttConnect);
   mqttClient.onDisconnect(onMqttDisconnect);
   mqttClient.onSubscribe(onMqttSubscribe);
   mqttClient.onUnsubscribe(onMqttUnsubscribe);
-  mqttClient.onMessage(onMqttMessage);
-  mqttClient.onPublish(onMqttPublish);
-
-*/
+//  mqttClient.onMessage(onMqttMessage);
+   mqttClient.onPublish(onMqttPublish);
 
   // создаем отдельные параллельные задачи, выполняющие группы функций  
   // стартуем основные задачи
