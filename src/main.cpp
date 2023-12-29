@@ -102,7 +102,7 @@ extern "C" {
 
 // начальные параметры устройства для подключения к WiFi и MQTT
 
-#define P_WIFI_SSID "iot_ls"                            // SSID нашей локальной сети  
+#define P_WIFI_SSID "iot_ls1"                            // SSID нашей локальной сети  
 #define P_WIFI_PASSWORD "vvssoft40"                     // пароль к нашей локальной сети
 #define P_MQTT_USER "mqtt_user"                         // имя пользователя для подключения к MQTT серверу
 #define P_MQTT_PWD "vvssoft40"                          // пароль для подключения к MQTT серверу
@@ -112,6 +112,12 @@ extern "C" {
 #define P_LWT_TOPIC   "diy/hires_amp_01/LWT"            // топик публикации доступности устройства
 #define P_SET_TOPIC   "diy/hires_amp_01/set"            // топик публикации команд для устройства
 #define P_STATE_TOPIC "diy/hires_amp_01/state"          // топик публикации состояния устройства
+
+// определяем константы для параметров и команд JSON формата в MQTT
+
+#define js_STATE "reset"                        // команда "мягкой" перезагрузки устройства с закрытием соединений
+#define js_CLR_CONFIG "clear_config"            // команда очистки текущей конфигурации в EPROM и перезагрузки устройства
+
 
 // тип описывающий режим работы подсветки индикатора  
 enum VU_mode_t : uint8_t {
@@ -433,7 +439,7 @@ void wifiTask(void *pvParam) {
 }
 
 void oneWireTask(void *pvParam) {
-// задача по поддержанию работы через шину 1Wire BUS
+// задача по поддержанию работы через шину OneWire BUS
   while (true) {
 
     vTaskDelay(1/portTICK_PERIOD_MS); 
@@ -447,8 +453,51 @@ void getCommandTask (void *pvParam) {
 // задача получения команды от датчика, таймера, MQTT, OneWire, кнопок
   while (true) {
 
-    vTaskDelay(1/portTICK_PERIOD_MS); 
+    //--- обработка событий получения MQTT команд в приложение 
+    if ( Has_MQTT_Command ) { // превращаем события MQTT в команды для отработки приложением    
 
+/*
+  const char* cur_state = doc[js_CLR_CONFIG];
+  if (StrCheck(cur_state,"ON")) cmdPowerON();
+    else { if (StrCheck(cur_state,"OFF")) cmdPowerOFF();    
+            else PassCount = 0; 
+    }       
+  // обработка тега BRIGHTNESS  
+  if (strstr(payload,C_BRIGHTNESS) != NULL ) curr_brightness = doc[C_BRIGHTNESS];
+  // обработка тега COLOR_TEMP
+  if (strstr(payload,C_COLOR_TEMP) != NULL ) color_temp = map(doc[C_COLOR_TEMP],153, 500, 0, 100);
+*/
+    }
+    //--- опрос кнопок - получение команд от лицевой панели 
+    bttn_power.tick();        // опрашиваем кнопку POWER
+    bttn_input.tick();        // опрашиваем кнопку INPUT  
+    bttn_light.tick();        // опрашиваем кнопку LIGHT  
+    // однократное нажатие на кнопку POWER
+    if (bttn_power.isSingle()) {        
+
+     // TODO: включаем/выключаем усилитель
+
+    }
+    // однократное нажатие на кнопку выбора входа
+    if (bttn_input.isSingle()) {        
+
+     // TODO: переключаем входы RCA/XLR
+
+    }
+    // однократное нажатие на кнопку переключения освещения
+    if (bttn_light.isSingle()) {        
+
+     // TODO: по кругу переключаем режим освещения
+
+    }
+    // одновременное нажатие и удержание кнопок Power и Input 
+    if (bttn_power.isHold() and bttn_input.isSingle()) {        
+ 
+     // TODO: сбрасываем параметры записанные во Flash память
+
+    }
+    // отдаем управление ядру FreeRT OS
+    vTaskDelay(1/portTICK_PERIOD_MS); 
   }
 }
 
