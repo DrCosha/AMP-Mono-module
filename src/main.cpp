@@ -491,8 +491,9 @@ void getCommandTask (void *pvParam) {
 
     }
     // одновременное нажатие и удержание кнопок Power и Input 
-    if (bttn_power.isHold() and bttn_input.isSingle()) {        
- 
+    if (bttn_power.isHold() and bttn_input.isHold()) {        
+
+
      // TODO: сбрасываем параметры записанные во Flash память
 
     }
@@ -522,7 +523,7 @@ void applayChangesTask (void *pvParam) {
 }
 
 void sendCommandTask (void *pvParam) {
-// шлем команду по 1WireBUS и ESP.NOW
+// шлем команду по OneWireBUS
   while (true) {
     
     vTaskDelay(1/portTICK_PERIOD_MS);     
