@@ -48,6 +48,7 @@ MQTT соединения нет, то периодически пытаемся
 extern "C" {
 #include "freertos/FreeRTOS.h"
 #include "freertos/timers.h"
+#include "freertos/semphr.h"
 }
 
 #include "GyverButton.h"
@@ -97,6 +98,11 @@ extern "C" {
 #define C_WIFI_AP_WAIT 180000                   // таймуат поднятой AP без соединения с клиентами (после этого опять пытаемся подключится как клиент) (180 сек)
 #define C_WIFI_CYCLE_WAIT 10000                 // таймуат цикла переустановки соединения с WiFi (10 сек)
 
+// задержки в формировании MQTT отчета
+
+#define C_MQTT_REPORT_DELAY_ON    30000         // 30 секунд для включенного блока
+#define C_MQTT_REPORT_DELAY_OFF  1800000        // 30 минут для выключенного 
+
 // определяем константы для уровней сигнала
 #define C_MAX_PWM_VALUE 1000                    // максимальное значение яркости при регулировании подсветки
 #define C_MIN_PWM_VALUE 60                      // минимальное значение яркости при регулировании подсветки
@@ -108,7 +114,7 @@ extern "C" {
 
 // начальные параметры устройства для подключения к WiFi и MQTT
 
-#define P_WIFI_SSID "iot_ls1"                            // SSID нашей локальной сети  
+#define P_WIFI_SSID "iot_ls"                            // SSID нашей локальной сети  
 #define P_WIFI_PASSWORD "vvssoft40"                     // пароль к нашей локальной сети
 #define P_MQTT_USER "mqtt_user"                         // имя пользователя для подключения к MQTT серверу
 #define P_MQTT_PWD "vvssoft40"                          // пароль для подключения к MQTT серверу
@@ -121,17 +127,48 @@ extern "C" {
 
 // определяем константы для параметров и команд JSON формата в MQTT
 
-#define js_RESET "reset"                        // команда "мягкой" перезагрузки устройства с закрытием соединений
-#define js_CLR_CONFIG "clear_config"            // команда очистки текущей конфигурации в EPROM и перезагрузки устройства
-#define js_REPORT "report"                      // команда принудительного формирования отчета в топик
+// --- имена команд ---
+#define jc_RESET      "reset"                   // команда "мягкой" перезагрузки устройства с закрытием соединений
+#define jc_CLR_CONFIG "clear_config"            // команда очистки текущей конфигурации в EPROM и перезагрузки устройства
+#define jc_REPORT     "report"                  // команда принудительного формирования отчета в топик
+
+// --- имена ключей ---
+#define jk_POWER          "power"                 // ключ описания состояния общего включения
+#define jk_SELECTOR       "input"                 // ключ описания входа RCA / XLR
+#define jk_LIGHT_MODE     "vu_light"              // ключ описания режима подсветки VU индикатора
+#define jk_BRIGHTNESS     "vu_brightness"         // ключ описания значения яркости подсветки
+#define jk_AMBIENT        "ambient"               // ключ описания значения датчика освещенности
+#define jk_TRIGGER_IN     "trigger_in"            // ключ описания значения входа триггера
+#define jk_TRIGGER_BYPASS "bypass"                // ключ описания режима проброса триггерного входа
+
+// --- значения ключей и команд ---
+#define jv_ONLINE         "online"                // 
+#define jv_OFFLINE        "offline"               //
+#define jv_ON             "on"                    //
+#define jv_OFF            "off"                   //
+#define jv_RCA            "rca"                   //
+#define jv_XLR            "xlr"                   //
+#define jv_AUTO           "auto"                  //
+#define jv_MIN            "min"                   //
+#define jv_MAX            "max"                   //
 
 // тип описывающий режим работы подсветки индикатора  
 enum VU_mode_t : uint8_t {
   VL_AUTO,          // автоматический режим подсветки по датчику
-  VL_LOW,           // минимальный уровень подсветки
-  VL_HIGH,          // максимальный уровень подсветки
+  VL_ON_LOW,        // минимальный уровень подсветки
+  VL_ON_MIDDLE,     // средний уровень подсветки
+  VL_ON_HIGH,       // максимальный уровень подсветки
   VL_OFF            // подсветка выключена
 };                                    
+
+const char* VU_mode_str[]  = {
+  "auto",           // автоматический режим подсветки по датчику
+  "on_low",         // минимальный уровень подсветки
+  "on_middle",      // средний уровень подсветки
+  "on_high",        // максимальный уровень подсветки
+  "off"             // подсветка выключена
+};
+
 
 // тип описывающий режим работы WIFI - работа с самим WiFi и MQTT 
 enum WiFi_mode_t : uint8_t {
@@ -194,15 +231,18 @@ uint32_t tm_PowerOn = 0;                        // когда включено �
 uint32_t tm_LastAmbientCheck = 0;               // последний момент проверки внешнего освещения
 uint32_t tm_LastBrightnessSet = 0;              // последний момент установки яркости индикатора
 uint32_t tm_LastReportToMQTT = 0;               // время последнего отчета в MQTT
+uint32_t cur_MQTT_REPORT_DELAY = C_MQTT_REPORT_DELAY_OFF;     // по умолчанию значение равно задержке выключенного блока
 
 // общие флаги программы - команды и изменения 
 bool f_HasMQTTCommand = false;                  // флаг получения MQTT команды 
 bool f_HasChanges = false;                      // флаг наличия изменений
+bool f_HasReportNow = false;                    // флаг формирования отчёта "прямо сейчас"
 
 // переменные управления яркостью индикатора
 uint16_t  v_CurrAmbient = 0;                    // усредненная величина текущей яркости окружающенго освещения
 uint16_t  v_GoalBrightness = 0;                 // величина рассчитанной яркости подсветки VU индикатора по текущей освещенности
 uint16_t  v_CurrBrightness = 0;                 // величина текущей установленной яркости подсветки VU индикатора
+bool      v_TriggerIN = false;                  // текущее значение на входном триггере
 
 // создаем буфера и структуры данных
 GlobalParams  curConfig;                        // набор параметров управляющих текущей конфигурацией
@@ -217,7 +257,11 @@ GButton bttn_light(BTTN_UV_LIGHT_PIN, HIGH_PULL, NORM_OPEN);                    
 AsyncMqttClient   mqttClient;                  // MQTT клиент
 
 // создаем объект - JSON документ для приема/передачи данных через MQTT
-StaticJsonDocument<255> doc;                   // создаем json документ с буфером в 255 байт 
+StaticJsonDocument<255> InputJSONdoc,          // создаем входящий json документ с буфером в 255 байт 
+                        OutputJSONdoc;         // создаем исходящий json документ с буфером в 255 байт 
+
+// создаем мьютексы для синхронизации доступа к данным
+SemaphoreHandle_t sem_InputJSONdoc = xSemaphoreCreateBinary();                           // создаем двоичный семафор для доступа к JSON документу 
 
 // =============================== общие процедуры и функции ==================================
 
@@ -339,9 +383,7 @@ void wifiTask(void *pvParam) {
       WiFi.mode(WIFI_STA);
       WiFi.disconnect();
       #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода
-      Serial.print("Try to connect WiFi: ");
-      Serial.print(curConfig.wifi_ssid);
-      Serial.print("[");
+      Serial.printf("Try to connect WiFi: %s[",curConfig.wifi_ssid);
       #endif
       StartWiFiCycle = millis();
       // изначально пытаемся подключится в качестве клиента к существующей сети с грантами из конфигурации
@@ -377,8 +419,7 @@ void wifiTask(void *pvParam) {
     case WF_CLIENT:
       // включение WIFI в режиме клиента 
       #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода
-      Serial.print("Try to connect MQTT: ");
-      Serial.print(curConfig.mqtt_host[0]); Serial.print("."); Serial.print(curConfig.mqtt_host[1]); Serial.print("."); Serial.print(curConfig.mqtt_host[2]); Serial.print("."); Serial.println(curConfig.mqtt_host[3]); 
+      Serial.printf("Try to connect MQTT: %u.%u.%u.%u \n", curConfig.mqtt_host[0], curConfig.mqtt_host[1], curConfig.mqtt_host[2], curConfig.mqtt_host[3]); 
       #endif     
       s_CurrentWIFIMode = WF_MQTT;
       break;    
@@ -415,25 +456,29 @@ void wifiTask(void *pvParam) {
       WiFi.mode(WIFI_AP);
       WiFi.disconnect();      
       #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
-      Serial.print("Create AP with SSID: ");
-      Serial.println(AP_SSID);
+      Serial.printf("Create AP with SSID: %s\n", AP_SSID);
       #endif    
       if (WiFi.softAP(AP_SSID,NULL,def_WiFi_Channel)) {     // собственно создаем точку доступа на дефолтном канале
         #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
-        Serial.print("AP created with IP: ");
-        Serial.println(WiFi.softAPIP());
+        Serial.printf("AP created with IP: %s\n", WiFi.softAPIP());
         #endif 
+        StartWiFiCycle = millis();                          // даем отсечку по времени для поднятия точки доступа        
         // если точку доступа удалось поднять, то даем ей работать до тех пор пока не кончился таймаут C_WIFI_AP_WAIT, или есть коннекты к точке доступа  
-        while ((WiFi.softAPgetStationNum()>0) && (millis() - StartWiFiCycle < C_WIFI_AP_WAIT)) {
+
+
+        while ((WiFi.softAPgetStationNum()>0) or ((millis()-StartWiFiCycle < C_WIFI_AP_WAIT))) {
           
           // TODO:           
+
+          Serial.printf("Подключено: %d\n", WiFi.softAPgetStationNum());
+
           /*
                а вот здесь нужно поднять сервер со страничкой настроек для изменения конфигурации модуля ESP32
                после подтверждения выхода с этой странички, автоматически уходим на переподключение в режиме клиента
 
           */
 
-          vTaskDelay(pdMS_TO_TICKS(1000));      // отдаем управление и ждем секунду перед следующей проверкой
+          vTaskDelay(pdMS_TO_TICKS(500));       // отдаем управление и ждем 0.5 секунды перед следующей проверкой
         }
       }
       s_CurrentWIFIMode = WF_UNKNOWN;           // и опять начинаем все с начала и переключаемся в режим попытки установления связи с роутером
@@ -449,51 +494,57 @@ void oneWireTask(void *pvParam) {
 // задача по поддержанию работы через шину OneWire BUS
   while (true) {
 
+
     vTaskDelay(1/portTICK_PERIOD_MS); 
 
+
   }
+}
+
+void cmdReset() {
+// команда сброса конфигурации до состояния по умолчанию и перезагрузка
+  if (mqttClient.connected()) mqttClient.publish(curConfig.lwt_topic, 0, true, jv_OFFLINE);  // публикуем в топик LWT_TOPIC событие об отключении
+  ESP.restart();                                                                             // перезагружаемся  
+}
+
+void cmdClearConfig_Reset() {
+// команда сброса конфигурации до состояния по умолчанию и перезагрузка
+  if (s_EnableEEPROM) { // если EEPROM разрешен и есть             
+      SetConfigByDefault();                                                                  // в конфигурацию записываем значения по умолчанию
+      curConfig.simple_crc16 = GetCrc16Simple((uint8_t*)&curConfig, sizeof(curConfig)-4);    // считаем CRC16 для конфигурации
+      EEPROM.put(0,curConfig);                                                               // записываем конфигурацию
+      EEPROM.commit();                                                                       // подтверждаем изменения
+    }  
+  cmdReset();                                                                                // перезагружаемся  
 }
 
 // ================================== основные задачи времени выполнения =================================
 
 void getCommandTask (void *pvParam) {
 // задача получения команды от датчика, таймера, MQTT, OneWire, кнопок
-  while (true) {
 
+  while (true) {
     //--- обработка событий получения MQTT команд в приложение 
     if ( f_HasMQTTCommand ) {                                         // превращаем события MQTT в команды для отработки приложением    
-
-      if (doc.containsKey(js_CLR_CONFIG) and doc[js_CLR_CONFIG])  {   // послана команда обнуления конфигурации
-
-        // TODO: Serial.println("Обнуляем конфиг и перегружаемся");
-
+      // защищаем секцию работы с Static JSON DOC с помощью мьютекса
+      // MQTT: clear_config
+      if (InputJSONdoc.containsKey(jc_CLR_CONFIG) and InputJSONdoc[jc_CLR_CONFIG])  {   // послана команда обнуления конфигурации и перезагрузки
+        cmdClearConfig_Reset();
+      }
+      // MQTT: reset
+      if (InputJSONdoc.containsKey(jc_RESET) and InputJSONdoc[jc_RESET])  {             // послана команда перезагрузки
+        cmdReset();                                                   // просто перезагружаемся  
+      }
+      // MQTT: report
+      if (InputJSONdoc.containsKey(jc_REPORT) and InputJSONdoc[jc_REPORT])  {   // послана команда принудительного отчета
+        f_HasReportNow = true;                                       // взводим флаг, что отчёт нужен сейчас
       }
 
-      if (doc.containsKey(js_RESET) and doc[js_RESET])  {   // послана команда перезагрузки
-
-        // TODO: Serial.println("Перегружаемся");
-
-      }
-
-      if (doc.containsKey(js_REPORT) and doc[js_REPORT])  {   // послана команда принудительного отчета
-
-        // TODO: Serial.println("Готовим отчёт в топик");
-
-      }
-
-/*
-  const char* cur_state = doc[js_CLR_CONFIG];
-  if (StrCheck(cur_state,"ON")) cmdPowerON();
-    else { if (StrCheck(cur_state,"OFF")) cmdPowerOFF();    
-            else PassCount = 0; 
-    }       
-  // обработка тега BRIGHTNESS  
-  if (strstr(payload,C_BRIGHTNESS) != NULL ) curr_brightness = doc[C_BRIGHTNESS];
-  // обработка тега COLOR_TEMP
-  if (strstr(payload,C_COLOR_TEMP) != NULL ) color_temp = map(doc[C_COLOR_TEMP],153, 500, 0, 100);
-*/
+      // TODO: прочие команды из MQTT
 
       f_HasMQTTCommand = false;                                       // сбрасываем флаг наличия изменений через MQTT 
+      InputJSONdoc.clear();                                           // очищаем входной документ
+      xSemaphoreGive(sem_InputJSONdoc);                               // отпускаем семафор обработки входного сообщения
     }
     //--- опрос кнопок - получение команд от лицевой панели 
     bttn_power.tick();                                                // опрашиваем кнопку POWER
@@ -518,12 +569,10 @@ void getCommandTask (void *pvParam) {
      // TODO: по кругу переключаем режим освещения
 
     }
-    // одновременное нажатие и удержание кнопок Power и Input 
+    // одновременное нажатие и удержание кнопок Power и Input  
+    // команда сброса конфигурации до заводских параметров и перезагрузка
     if (bttn_power.isHold() and bttn_input.isHold()) {        
-
-
-     // TODO: сбрасываем параметры записанные во Flash память
-
+        cmdClearConfig_Reset();
     }
     // отдаем управление ядру FreeRT OS
     vTaskDelay(1/portTICK_PERIOD_MS); 
@@ -560,44 +609,68 @@ void sendCommandTask (void *pvParam) {
 void reportTask (void *pvParam) {
 // репортим о текущем состоянии в MQTT и если отладка то и в Serial
   while (true) {
-    
+    if (((millis()-tm_LastReportToMQTT)>cur_MQTT_REPORT_DELAY) || f_HasReportNow) {  // если наступило время отчёта или взведен флаг "отчёта сейчас"
+      digitalWrite(LED_POWER_BLUE_PIN, HIGH);          // включение через подачу 1
+      if (mqttClient.connected()) {  // если есть связь с MQTT - репорт в топик
+        // чистим документ
+        OutputJSONdoc.clear(); 
+        // добавляем поля в документ
+        OutputJSONdoc[jk_POWER] = s_AmpPowerOn ? jv_ON : jv_OFF;                                    // ключ общего включения
+        OutputJSONdoc[jk_SELECTOR] = curConfig.inp_selector ? jv_RCA : jv_XLR;                      // режим входа RCA / XLR
+        OutputJSONdoc[jk_LIGHT_MODE] = VU_mode_str[curConfig.vu_light_mode];                        // режим подсветки VU индикатора
+        OutputJSONdoc[jk_BRIGHTNESS] = v_GoalBrightness;                                            // значение целевой яркости подсветки
+        OutputJSONdoc[jk_AMBIENT] = v_CurrAmbient;                                                  // ключ описания значения датчика освещенности
+        OutputJSONdoc[jk_TRIGGER_IN] = v_TriggerIN ? jv_ON : jv_OFF;                                // ключ описания значения входа триггера
+        OutputJSONdoc[jk_TRIGGER_BYPASS] = curConfig.sync_trigger_in_out ? jv_ON : jv_OFF;          // ключ описания режима проброса триггерного входа
+        // серилизуем в строку
+        String tmpPayload;
+        serializeJson(OutputJSONdoc, tmpPayload);
+        // публикуем в топик P_STATE_TOPIC серилизованный json через буфер buffer
+        char buffer[ tmpPayload.length()+1 ];
+        tmpPayload.toCharArray(buffer, sizeof(buffer));   
+        mqttClient.publish(P_STATE_TOPIC, 0, true, buffer );
+      }
+      #ifdef DEBUG_LEVEL_PORT 
+        Serial.println();
+        Serial.println("<<<< Current state report >>>>");
+        Serial.printf("%s : %s\n", jk_POWER, s_AmpPowerOn ? jv_ON : jv_OFF );
+        Serial.printf("%s : %s\n", jk_SELECTOR, curConfig.inp_selector ? jv_RCA : jv_XLR);
+        Serial.printf("%s : %s\n", jk_LIGHT_MODE, VU_mode_str[curConfig.vu_light_mode] );
+        Serial.printf("%s : %d\n", jk_BRIGHTNESS, v_GoalBrightness );
+        Serial.printf("%s : %d\n", jk_AMBIENT, v_CurrAmbient );
+        Serial.printf("%s : %s\n", jk_TRIGGER_IN, v_TriggerIN ? jv_ON : jv_OFF );
+        Serial.printf("%s : %s\n", jk_TRIGGER_BYPASS, curConfig.sync_trigger_in_out ? jv_ON : jv_OFF );
+        Serial.println("<<<<>>>>");
+      #endif                
+      tm_LastReportToMQTT = millis();           // взводим интервал отсчёта
+      f_HasReportNow = false;                   // сбрасываем флаг
+      digitalWrite(LED_POWER_BLUE_PIN, LOW);    // выключение индикации передачи по MQTT через подачу 0             
+    }
     vTaskDelay(1/portTICK_PERIOD_MS);         
-
   }
 }
 
 
 // -------------------------- в этом фрагменте описываем call-back функции MQTT клиента --------------------------------------------
 void onMqttConnect(bool sessionPresent) {   
-
+  // обработчик подключения к MQTT
   #ifdef DEBUG_LEVEL_PORT                                    
     Serial.println("Connected to MQTT.");  //  "Подключились по MQTT."
-    Serial.print("Session present: ");  //  "Текущая сессия: "
-    Serial.println(sessionPresent);
   #endif                
-
   // далее подписываем ESP32 на набор необходимых для управления топиков:
   uint16_t packetIdSub = mqttClient.subscribe(curConfig.command_topic, 0);  // подписываем ESP32 на топик SET_TOPIC
-
   #ifdef DEBUG_LEVEL_PORT                                      
-    Serial.print("Subscribing at QoS 0, packetId: ");
-    Serial.println(packetIdSub);
-    Serial.print("Topic: ");
-    Serial.println(curConfig.command_topic);
+    Serial.printf("Subscribing at QoS 0, packetId: %d on topic :[%s]\n", packetIdSub, curConfig.command_topic);
   #endif                  
-
   // сразу публикуем событие о своей активности
-  mqttClient.publish(curConfig.lwt_topic, 0, true, "online");           // публикуем в топик LWT_TOPIC событие о своей жизнеспособности
-
+  mqttClient.publish(curConfig.lwt_topic, 0, true, jv_ONLINE);           // публикуем в топик LWT_TOPIC событие о своей жизнеспособности
   #ifdef DEBUG_LEVEL_PORT                                      
-    Serial.print("Publishing LWT state in [");
-    Serial.print(curConfig.lwt_topic); 
-    Serial.println("]. QoS 0. "); 
-  #endif                    
-  
+    Serial.printf("Publishing LWT state in [%s]. QoS 0. ", curConfig.lwt_topic); 
+  #endif                     
 }
 
 void onMqttDisconnect(AsyncMqttClientDisconnectReason reason) {
+  // обработчик отключения от MQTT  
   #ifdef DEBUG_LEVEL_PORT                                                                           
     Serial.println("Disconnected from MQTT.");                      // если отключились от MQTT
   #endif         
@@ -605,28 +678,23 @@ void onMqttDisconnect(AsyncMqttClientDisconnectReason reason) {
 }
 
 void onMqttSubscribe(uint16_t packetId, uint8_t qos) {
+  // обработка подтверждения подписки на топик
   #ifdef DEBUG_LEVEL_PORT   
-    Serial.println("Subscribe acknowledged.");          // подписка подтверждена
-    Serial.print("  packetId: ");                       // 
-    Serial.println(packetId);                           // выводим ID пакета
-    Serial.print("  qos: ");                            // 
-    Serial.println(qos);                                // выводим значение QoS
+    Serial.printf("Subscribe acknowledged. \n  packetId: %d\n  qos: %d\n", packetId, qos);  
   #endif         
 }
 
 void onMqttUnsubscribe(uint16_t packetId) {
+  // обработка подтверждения отписки от топика  
   #ifdef DEBUG_LEVEL_PORT     
-    Serial.println("Unsubscribe acknowledged.");        // отписка подтверждена
-    Serial.print("  packetId: ");                       //
-    Serial.println(packetId);                           // выводим ID пакета
+    Serial.printf("Unsubscribe acknowledged.\n  packetId: %d\n", packetId); 
   #endif                     
 }
 
 void onMqttPublish(uint16_t packetId) {
+  // обработка подтверждения публикации
   #ifdef DEBUG_LEVEL_PORT     
-    Serial.println("Publish acknowledged.");            // публикация подтверждена
-    Serial.print("  packetId: ");                       //
-    Serial.println(packetId);                           // выводим ID пакета
+    Serial.printf("Publish acknowledged.\n  packetId: %d\n", packetId);   
   #endif                     
 }
 
@@ -634,42 +702,29 @@ void onMqttPublish(uint16_t packetId) {
 // в этой функции обрабатываем события получения данных в управляющем топике SET_TOPIC
 void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties properties, size_t len, size_t index, size_t total) {
   String messageTemp;
-
-  #ifdef DEBUG_LEVEL_PORT         
-    Serial.print("Get message: [");
-  #endif                         
-
+  
   for (int i = 0; i < len; i++) {                       // преобразуем полученные в сообщении данные в строку
-    #ifdef DEBUG_LEVEL_PORT         
-      Serial.print((char)payload[i]);
-    #endif                         
     messageTemp += (char)payload[i];
   }
   messageTemp[len] = '\0';  
-
-  #ifdef DEBUG_LEVEL_PORT         
-    Serial.println("]");
-  #endif                         
-
   // проверяем, что мы получили MQTT сообщение в командном топике
   if (strcmp(topic, curConfig.command_topic) == 0) {
     // разбираем MQTT сообщение и подготавливаем буфер с изменениями для формирования команд    
-    deserializeJson(doc, messageTemp);                  // десерилизуем сообщение и взводим признак готовности к обработке
+    // для этого получаем семафор обработки входного JSON документа
+    while ( xSemaphoreTake(sem_InputJSONdoc,(TickType_t) 10) != pdTRUE ) {
+      vTaskDelay(1/portTICK_PERIOD_MS);         
+    }
+    deserializeJson(InputJSONdoc, messageTemp);                  // десерилизуем сообщение и взводим признак готовности к обработке
     // для коротких сообщений без ключей дополняем DOC объект
-    if (strstr(payload,js_CLR_CONFIG) != NULL ) doc[js_CLR_CONFIG] = true;
-    if (strstr(payload,js_RESET) != NULL ) doc[js_RESET] = true;
-    if (strstr(payload,js_REPORT) != NULL ) doc[js_REPORT] = true;
+    if (strstr(payload,jc_CLR_CONFIG) != NULL ) InputJSONdoc[jc_CLR_CONFIG] = true;
+    if (strstr(payload,jc_RESET) != NULL ) InputJSONdoc[jc_RESET] = true;
+    if (strstr(payload,jc_REPORT) != NULL ) InputJSONdoc[jc_REPORT] = true;
     f_HasMQTTCommand = true;                            // взводим флаг получения команды по MQTT
+    // отдадим семафор обработки документа только после преобразования JSON документа в команды
   }
- 
   #ifdef DEBUG_LEVEL_PORT         
-    Serial.println("Publish received.");                //  выводим на консоль данные из топика
-    Serial.print("  topic: ");                          //  "  топик: "
-    Serial.println(topic);                              // название топика 
-    Serial.print("  message: ");                        //  "  сообщение: "
-    Serial.println(messageTemp);                        //  сообщение 
-  #endif                         
-
+    Serial.printf("Publish received.\n  topic: %s\n  message: [%s]\n", topic, messageTemp);
+  #endif
 }
 
 // =================================== инициализация контроллера и программных модулей ======================================
@@ -740,7 +795,7 @@ void setup() {
   // инициализируем шину 1Wire BUS
 
   if (!OneWireBus.InitializeBus(ONE_WIRE_PIN,BROADCAST_ADDR,OneWireCycle,sizeof(SyncBUSParams))){   // инициализируем шину OneWire
-     Serial.println("Ошибка инициализации шины ONEWIREBUS!");
+     Serial.println("Ошибка инициализации шины OneWireBUS!");
   }
   
   // инициализируем кнопку POWER
@@ -778,27 +833,25 @@ void setup() {
       if (EEPROM.commit()) Serial.println("EPPROM update success.");
         else Serial.println("Error in write to EPPROM.");
     }
-    Serial.println("");
-    Serial.println("--- Инициализация блока управления прошла со следующими параметрами: ---");
-    Serial.print("  Input RCA-1|XLR-0 : "); Serial.println(curConfig.inp_selector ? "XLR" : "RCA");
-    Serial.print("  VU light mode: "); Serial.println(curConfig.vu_light_mode);    
-    Serial.print("  Ext trigger sync: "); Serial.println(curConfig.sync_trigger_in_out);    
-    Serial.print("  WiFi mode: "); Serial.println(s_CurrentWIFIMode);
-    Serial.print("  WiFi SSid: "); Serial.println(curConfig.wifi_ssid);    
-    Serial.print("  WiFi pwd: "); Serial.println(curConfig.wifi_pwd);
-    Serial.print("  MQTT usr: "); Serial.println(curConfig.mqtt_usr);
-    Serial.print("  MQTT pwd: "); Serial.println(curConfig.mqtt_pwd);
-    Serial.print("  MQTT addr: "); Serial.print(curConfig.mqtt_host[0]); Serial.print("."); Serial.print(curConfig.mqtt_host[1]); Serial.print("."); Serial.print(curConfig.mqtt_host[2]); Serial.print("."); Serial.println(curConfig.mqtt_host[3]); 
-    Serial.print("  MQTT port: "); Serial.println(curConfig.mqtt_port);
+    Serial.printf("\n--- Инициализация блока управления прошла со следующими параметрами: ---\n");
+    Serial.printf("  Input RCA-1|XLR-0 : %s\n", curConfig.inp_selector ? "XLR" : "RCA");
+    Serial.printf("  VU light mode: %s\n", VU_mode_str[curConfig.vu_light_mode]);    
+    Serial.printf("  Ext trigger sync:  %s\n", curConfig.sync_trigger_in_out ? "true" : "false");  
+    Serial.printf("  WiFi mode: %d \n", s_CurrentWIFIMode);
+    Serial.printf("  WiFi SSid: %s\n", curConfig.wifi_ssid);    
+    Serial.printf("  WiFi pwd: %s\n", curConfig.wifi_pwd);
+    Serial.printf("  MQTT usr: %s\n", curConfig.mqtt_usr);
+    Serial.printf("  MQTT pwd: %s\n", curConfig.mqtt_pwd);
+    Serial.printf("  MQTT addr: %u.%u.%u.%u\n", curConfig.mqtt_host[0], curConfig.mqtt_host[1], curConfig.mqtt_host[2], curConfig.mqtt_host[3]); 
+    Serial.printf("  MQTT port: %d\n", curConfig.mqtt_port);
     Serial.println("---");    
-    Serial.print("  COMMAND topic: "); Serial.println(curConfig.command_topic);
-    Serial.print("  REPORT topic: "); Serial.println(curConfig.report_topic);
-    Serial.print("  LWT topic: "); Serial.println(curConfig.lwt_topic);
+    Serial.printf("  COMMAND topic: %s\n", curConfig.command_topic);
+    Serial.printf("  REPORT topic: %s\n", curConfig.report_topic);
+    Serial.printf("  LWT topic: %s\n", curConfig.lwt_topic);
     Serial.println("---");    
-    Serial.print("  CRC by read: "); Serial.println(curConfig.simple_crc16,HEX);
-    Serial.print("  CRC by calc: "); Serial.println(GetCrc16Simple((uint8_t*)&curConfig, sizeof(curConfig)-4),HEX);  
-    Serial.println("---");
-    Serial.println("");  
+    Serial.printf("  CRC by read: %04X\n",curConfig.simple_crc16);
+    Serial.printf("  CRC by calc: %04X\n",GetCrc16Simple((uint8_t*)&curConfig, sizeof(curConfig)-4));  
+    Serial.printf("---\n\n");
   }
   else { Serial.println("Warning! Блок работает без сохранения конфигурации !!!"); 
   }
@@ -827,32 +880,35 @@ void setup() {
   mqttClient.onMessage(onMqttMessage);
   mqttClient.onPublish(onMqttPublish);
 
+  // настраиваем семафоры - сбрасываем их
+  xSemaphoreGive( sem_InputJSONdoc );
+
+  // обнуляем все отметки времени для правильного их отсчёта
+  tm_LastAmbientCheck = 0;
+  tm_LastBrightnessSet = 0;
+  tm_LastReportToMQTT = 0;
+  tm_PowerOn = 0;
+
   // создаем отдельные параллельные задачи, выполняющие группы функций  
   // стартуем основные задачи
-  if (xTaskCreate(getCommandTask, "command", 4096, NULL, 1, NULL) != pdPASS) { 
-    // все плохо, задачу не создали
+  if (xTaskCreate(getCommandTask, "command", 4096, NULL, 1, NULL) != pdPASS) {  // все плохо, задачу не создали
     Halt("Error: Get command task not created!");
   }
-  if (xTaskCreate(applayChangesTask, "applay", 4096, NULL, 1, NULL) != pdPASS) { 
-    // все плохо, задачу не создали
+  if (xTaskCreate(applayChangesTask, "applay", 4096, NULL, 1, NULL) != pdPASS) { // все плохо, задачу не создали
     Halt("Error: Applay changes task not created!");
   }
-  if (xTaskCreate(sendCommandTask, "send", 4096, NULL, 1, NULL) != pdPASS) { 
-    // все плохо, задачу не создали
+  if (xTaskCreate(sendCommandTask, "send", 4096, NULL, 1, NULL) != pdPASS) { // все плохо, задачу не создали
     Halt("Error: Send command task not created!");
   }
-  if (xTaskCreate(reportTask, "report", 4096, NULL, 1, NULL) != pdPASS) { 
-    // все плохо, задачу не создали
+  if (xTaskCreate(reportTask, "report", 4096, NULL, 1, NULL) != pdPASS) { // все плохо, задачу не создали
     Halt("Error: Report task not created!");
   }  
   
   // стартуем коммуникационные задачи
-  if (xTaskCreate(oneWireTask, "onewire", 4096, NULL, 1, NULL) != pdPASS) { 
-    // все плохо, задачу не создали
+  if (xTaskCreate(oneWireTask, "onewire", 4096, NULL, 1, NULL) != pdPASS) { // все плохо, задачу не создали
     Halt("Error: OneWire communication task not created!");
   }  
-  if (xTaskCreate(wifiTask, "wifi", 4096*2, NULL, 1, NULL) != pdPASS) { 
-    // все плохо, задачу не создали
+  if (xTaskCreate(wifiTask, "wifi", 4096*2, NULL, 1, NULL) != pdPASS) { // все плохо, задачу не создали
     Halt("Error: WiFi communication task not created!");
   }  
 
