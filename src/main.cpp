@@ -35,9 +35,10 @@ MQTT соединения нет, то периодически пытаемся
 
 Команды в топике команд:
 
-  {clear_config:true}  - очистить Flash память и загрузится с конфигурацией по умолчанию
-  {reset}              - перезагрузить контроллер управления усилителем 
-  {report}             - сформировать отчет о текущем состоянии в топик REPORT  
+  {"clear_config"}            - очистить Flash память и загрузится с конфигурацией по умолчанию
+  {"reset"}                   - перезагрузить контроллер управления усилителем 
+  {"report"}                  - сформировать отчет о текущем состоянии в топик REPORT  
+  {"power":"on"|"off"}        - включить, выключить модуль
 
 */
 
@@ -110,8 +111,8 @@ extern "C" {
 #define C_MAX_SENSOR_VALUE 4000                 // максимальное значение возвращаемое сенсором освещенности
 #define C_MIN_SENSOR_VALUE 0                    // минимальное значение возвращаемое сенсором освещенности
 
-#define INP_XLR true                            // константа выбор входа XLR
-#define INP_RCA false                           // константа выбор входа RCA
+#define INP_XLR true                            // константа выбор входа XLR (1)
+#define INP_RCA false                           // константа выбор входа RCA (0)
 
 // начальные параметры устройства для подключения к WiFi и MQTT
 
@@ -532,9 +533,10 @@ void cmdSwitchInput(const bool InpMode) { // команда переключен
   #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
   Serial.printf("Try switch from %s to %s\n", curConfig.inp_selector ? jv_XLR : jv_RCA, InpMode ? jv_XLR : jv_RCA);
   #endif      
-  f_HasChanges = (InpMode != curConfig.inp_selector);                                        // взводим флаг изменения, если нужно
-  if (f_HasChanges) {  // и если переключение необходимо - делаем действия
-    curConfig.inp_selector = InpMode;
+  if (InpMode != curConfig.inp_selector) {                                                   // проверяем, что необходимо переключить вход
+    f_HasChanges = true;                                                                     // взводим флаг изменения
+    f_HasReportNow = true;                                                                   // взводим флаг отчёта об изменении состояния
+    curConfig.inp_selector = InpMode;                                                        // собственно переключаем вход
     if (curConfig.inp_selector) digitalWrite(RELAY_SELECTOR_PIN, LOW);                       // подключаем вход RCA    
       else digitalWrite(RELAY_SELECTOR_PIN, HIGH);                                           // подключаем вход XLR    
   }
@@ -546,12 +548,23 @@ void cmdChangeVUlightMode() {
 }
 
 void cmdPowerON() {
-// команда сброса конфигурации до состояния по умолчанию и перезагрузка
+// команда включения усилителя
   #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
   Serial.printf("Switch power from %s to ON\n",s_AmpPowerOn ? jv_ON : jv_OFF);
-  #endif      
-  s_AmpPowerOn = true;
+  #endif        
+  s_AmpPowerOn = true;                                 // отмечаем текущее состояние  
+  digitalWrite(RELAY_POWER_PIN, HIGH);                 // включаем основной силовой блок питания
+  digitalWrite(TRIGGER_OUT_PIN, HIGH);                 // включаем порт выхода TRIGGER_OUT
+
+//  if (temp_AmpIsOn != PowerONState)  {  // находимся в процессе включения усилителя
+//      VU_Enable = false;                               // выключаем стрелочки VU в момент переходных процессов включения усилителя
+//      PowerOnTime = millis();                          // запоминаем, момент включения усилителя в миллисекундах  
+//  }
+//  SetDefaultBrightness();                              // выставляем яркость подсветки по умолчанию
+//  temp_AmpIsOn = true;                                 // запоминаем режим  
+
   f_HasChanges = true;
+  f_HasReportNow = true;
 }
 
 void cmdPowerOFF() {
@@ -561,6 +574,7 @@ void cmdPowerOFF() {
   #endif      
   s_AmpPowerOn = false;
   f_HasChanges = true;  
+  f_HasReportNow = true;  
 }
 
 // ================================== основные задачи времени выполнения =================================
@@ -652,8 +666,8 @@ void applayChangesTask (void *pvParam) {
       digitalWrite(LED_POWER_GREEN_PIN,HIGH);
       digitalWrite(LED_POWER_RED_PIN,LOW);
       // отображаем селектор входов
-      digitalWrite(LED_SELECTOR_RCA_PIN,curConfig.inp_selector); 
-      digitalWrite(LED_SELECTOR_XLR_PIN,!curConfig.inp_selector);
+      digitalWrite(LED_SELECTOR_RCA_PIN,!curConfig.inp_selector);     // RCA = 0 - поэтому инверсия
+      digitalWrite(LED_SELECTOR_XLR_PIN,curConfig.inp_selector);      // XLR = 1 - прямая запись
       } 
     else {
       // отображаем индикацию выключения модуля
@@ -701,13 +715,15 @@ void reportTask (void *pvParam) {
 // репортим о текущем состоянии в MQTT и если отладка то и в Serial
   while (true) {
     if (((millis()-tm_LastReportToMQTT)>cur_MQTT_REPORT_DELAY) || f_HasReportNow) {  // если наступило время отчёта или взведен флаг "отчёта сейчас"
-      digitalWrite(LED_POWER_BLUE_PIN, HIGH);          // включение через подачу 1
+      digitalWrite(LED_POWER_BLUE_PIN, HIGH);                                                       // включение через подачу 1
+      if (s_AmpPowerOn) cur_MQTT_REPORT_DELAY = C_MQTT_REPORT_DELAY_ON;                             // при генерации отчёта делаем коррекцию на включение усилителя
+        else cur_MQTT_REPORT_DELAY = C_MQTT_REPORT_DELAY_OFF;
       if (mqttClient.connected()) {  // если есть связь с MQTT - репорт в топик
         // чистим документ
         OutputJSONdoc.clear(); 
         // добавляем поля в документ
         OutputJSONdoc[jk_POWER] = s_AmpPowerOn ? jv_ON : jv_OFF;                                    // ключ общего включения
-        OutputJSONdoc[jk_SELECTOR] = curConfig.inp_selector ? jv_RCA : jv_XLR;                      // режим входа RCA / XLR
+        OutputJSONdoc[jk_SELECTOR] = curConfig.inp_selector ? jv_XLR : jv_RCA;                      // режим входа RCA / XLR
         OutputJSONdoc[jk_LIGHT_MODE] = VU_mode_str[curConfig.vu_light_mode];                        // режим подсветки VU индикатора
         OutputJSONdoc[jk_BRIGHTNESS] = v_GoalBrightness;                                            // значение целевой яркости подсветки
         OutputJSONdoc[jk_AMBIENT] = v_CurrAmbient;                                                  // ключ описания значения датчика освещенности
@@ -725,7 +741,7 @@ void reportTask (void *pvParam) {
         Serial.println();
         Serial.println("<<<< Current state report >>>>");
         Serial.printf("%s : %s\n", jk_POWER, s_AmpPowerOn ? jv_ON : jv_OFF );
-        Serial.printf("%s : %s\n", jk_SELECTOR, curConfig.inp_selector ? jv_RCA : jv_XLR);
+        Serial.printf("%s : %s\n", jk_SELECTOR, curConfig.inp_selector ? jv_XLR : jv_RCA);
         Serial.printf("%s : %s\n", jk_LIGHT_MODE, VU_mode_str[curConfig.vu_light_mode] );
         Serial.printf("%s : %d\n", jk_BRIGHTNESS, v_GoalBrightness );
         Serial.printf("%s : %d\n", jk_AMBIENT, v_CurrAmbient );
@@ -828,6 +844,7 @@ void setup() {
   Serial.begin(115200);
   Serial.println();
 #endif
+
 
  // инициализация входов и выходов  
   pinMode(LED_POWER_GREEN_PIN, OUTPUT);       // инициализируем pin светодиода POWER GREEN 
