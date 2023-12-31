@@ -97,6 +97,7 @@ extern "C" {
 #define C_MQTT_CONNECT_TIMEOUT 10000            // задержка для установления MQTT соединения (10 сек)
 #define C_WIFI_AP_WAIT 180000                   // таймуат поднятой AP без соединения с клиентами (после этого опять пытаемся подключится как клиент) (180 сек)
 #define C_WIFI_CYCLE_WAIT 10000                 // таймуат цикла переустановки соединения с WiFi (10 сек)
+#define C_BLINKER_DELAY 800                     // задержка переключения блинкера
 
 // задержки в формировании MQTT отчета
 
@@ -124,6 +125,8 @@ extern "C" {
 #define P_LWT_TOPIC   "diy/hires_amp_01/LWT"            // топик публикации доступности устройства
 #define P_SET_TOPIC   "diy/hires_amp_01/set"            // топик публикации команд для устройства
 #define P_STATE_TOPIC "diy/hires_amp_01/state"          // топик публикации состояния устройства
+
+#define C_MAX_FAILED_TRYS 3                     // количество попыток повтора для поднятия AP точки    
 
 // определяем константы для параметров и команд JSON формата в MQTT
 
@@ -225,18 +228,21 @@ bool s_TriggerIn = false;                       // режим включения
 bool s_EnableEEPROM = false;                    // глобальная переменная разрешения работы с EEPROM
 bool s_VU_Enable = false;                       // разрешение работы стрелочного указателя
 WiFi_mode_t s_CurrentWIFIMode = WF_UNKNOWN;     // текущий режим работы WiFI
+uint8_t count_GetWiFiConfig = 0;                // счётчик повторов попыток соединения
 
 // временные моменты наступления контрольных событий в миллисекундах 
 uint32_t tm_PowerOn = 0;                        // когда включено питание
 uint32_t tm_LastAmbientCheck = 0;               // последний момент проверки внешнего освещения
 uint32_t tm_LastBrightnessSet = 0;              // последний момент установки яркости индикатора
 uint32_t tm_LastReportToMQTT = 0;               // время последнего отчета в MQTT
+uint32_t tm_LastBlinkFire = 0;                  // время последнего переключения флага блинкера
 uint32_t cur_MQTT_REPORT_DELAY = C_MQTT_REPORT_DELAY_OFF;     // по умолчанию значение равно задержке выключенного блока
 
 // общие флаги программы - команды и изменения 
 bool f_HasMQTTCommand = false;                  // флаг получения MQTT команды 
 bool f_HasChanges = false;                      // флаг наличия изменений
 bool f_HasReportNow = false;                    // флаг формирования отчёта "прямо сейчас"
+bool f_Blinker = false;                         // флаг "мигания" - переключается с задержкой C_BLINKER_DELAY
 
 // переменные управления яркостью индикатора
 uint16_t  v_CurrAmbient = 0;                    // усредненная величина текущей яркости окружающенго освещения
@@ -375,9 +381,8 @@ void wifiTask(void *pvParam) {
   while (true) {    
     switch (s_CurrentWIFIMode) {
     case WF_UNKNOWN:
-      // включаем индикацию соединения по WiFi
-      digitalWrite(LED_POWER_BLUE_PIN,HIGH);
       // начальное подключение WiFi - сброс всех соединений и новый цикл их поднятия 
+      count_GetWiFiConfig++;                                        // инкрементируем счётчик попыток 
       mqttClient.disconnect(true);                                  // принудительно отсоединяемся от MQTT       
       WiFi.persistent(false);
       WiFi.mode(WIFI_STA);
@@ -410,11 +415,13 @@ void wifiTask(void *pvParam) {
       break;
     case WF_OFF:   
       // WiFi принудительно выключен при получении ошибок при работе с WIFI 
-      mqttClient.disconnect(true);                                  // принудительно отсоединяемся от MQTT 
-      WiFi.persistent(false);
-      WiFi.disconnect();
-      vTaskDelay(pdMS_TO_TICKS(C_WIFI_CYCLE_WAIT));                 // ждем цикл перед еще одной проверкой
-      s_CurrentWIFIMode = WF_UNKNOWN;                               // уходим на пересоединение с WIFI
+      if (count_GetWiFiConfig == C_MAX_FAILED_TRYS) {                // если превышено количество попыток соединения
+           mqttClient.disconnect(true);                             // принудительно отсоединяемся от MQTT 
+           WiFi.persistent(false);                                  // принудительно отсоединяемся от WiFi 
+           WiFi.disconnect();
+           count_GetWiFiConfig++;
+        }   
+      vTaskDelay(pdMS_TO_TICKS(C_WIFI_CYCLE_WAIT));                 // ждем цикл перед еще одной проверкой           
       break;    
     case WF_CLIENT:
       // включение WIFI в режиме клиента 
@@ -441,13 +448,14 @@ void wifiTask(void *pvParam) {
         }  
       break;    
     case WF_IN_WORK:  // состояние в котором ничего не делаем, так как все нужные соединения установлены
+      count_GetWiFiConfig = 0;                                           // при успешном соединении сбрасываем счётчик попыток повтора 
       if (!mqttClient.connected() or !WiFi.isConnected()) {              // проверяем, что соединения всё еще есть. Если они пропали, делаем таймаут на цикл C_WIFI_CYCLE_WAIT и переустанавливаем соединение
         #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода
         if (!mqttClient.connected()) Serial.println("MQTT conneсtion lost.");
         if (!WiFi.isConnected()) Serial.println("WiFi conneсtion lost.");
         #endif
         vTaskDelay(pdMS_TO_TICKS(C_WIFI_CYCLE_WAIT)); 
-        s_CurrentWIFIMode = WF_OFF;                                      // уходим на пересоединение с WIFI
+        s_CurrentWIFIMode = WF_UNKNOWN;                                  // уходим на пересоединение с WIFI
       }
       break;    
     case WF_AP:
@@ -460,12 +468,11 @@ void wifiTask(void *pvParam) {
       #endif    
       if (WiFi.softAP(AP_SSID,NULL,def_WiFi_Channel)) {     // собственно создаем точку доступа на дефолтном канале
         #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
-        Serial.printf("AP created with IP: %s\n", WiFi.softAPIP());
+        Serial.print("AP created with IP: ");
+        Serial.println(WiFi.softAPIP());
         #endif 
         StartWiFiCycle = millis();                          // даем отсечку по времени для поднятия точки доступа        
-        // если точку доступа удалось поднять, то даем ей работать до тех пор пока не кончился таймаут C_WIFI_AP_WAIT, или есть коннекты к точке доступа  
-
-
+        // если точку доступа удалось поднять, то даем ей работать до тех пор пока не кончился таймаут C_WIFI_AP_WAIT, или есть коннекты к точке доступа       
         while ((WiFi.softAPgetStationNum()>0) or ((millis()-StartWiFiCycle < C_WIFI_AP_WAIT))) {
           
           // TODO:           
@@ -481,7 +488,8 @@ void wifiTask(void *pvParam) {
           vTaskDelay(pdMS_TO_TICKS(500));       // отдаем управление и ждем 0.5 секунды перед следующей проверкой
         }
       }
-      s_CurrentWIFIMode = WF_UNKNOWN;           // и опять начинаем все с начала и переключаемся в режим попытки установления связи с роутером
+      if (count_GetWiFiConfig == C_MAX_FAILED_TRYS) s_CurrentWIFIMode = WF_OFF;      // если достигнуто количество попыток соединения для получения конфигурации по WIFi - выключаем WIFI
+        else s_CurrentWIFIMode = WF_UNKNOWN;                                        // если нет - переключаемся в режим попытки установления связи с роутером
       break; 
     }
     // запоминаем точку конца цикла
@@ -501,6 +509,8 @@ void oneWireTask(void *pvParam) {
   }
 }
 
+// ------------------------ команды, которые обрабатываются в рамках получения событий ---------------------
+
 void cmdReset() {
 // команда сброса конфигурации до состояния по умолчанию и перезагрузка
   if (mqttClient.connected()) mqttClient.publish(curConfig.lwt_topic, 0, true, jv_OFFLINE);  // публикуем в топик LWT_TOPIC событие об отключении
@@ -518,12 +528,55 @@ void cmdClearConfig_Reset() {
   cmdReset();                                                                                // перезагружаемся  
 }
 
+void cmdSwitchInput(const bool InpMode) { // команда переключения входов усилителя  
+  #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+  Serial.printf("Try switch from %s to %s\n", curConfig.inp_selector ? jv_XLR : jv_RCA, InpMode ? jv_XLR : jv_RCA);
+  #endif      
+  f_HasChanges = (InpMode != curConfig.inp_selector);                                        // взводим флаг изменения, если нужно
+  if (f_HasChanges) {  // и если переключение необходимо - делаем действия
+    curConfig.inp_selector = InpMode;
+    if (curConfig.inp_selector) digitalWrite(RELAY_SELECTOR_PIN, LOW);                       // подключаем вход RCA    
+      else digitalWrite(RELAY_SELECTOR_PIN, HIGH);                                           // подключаем вход XLR    
+  }
+}
+
+void cmdChangeVUlightMode() {
+// по кругу переключаем режим освещения       
+
+}
+
+void cmdPowerON() {
+// команда сброса конфигурации до состояния по умолчанию и перезагрузка
+  #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+  Serial.printf("Switch power from %s to ON\n",s_AmpPowerOn ? jv_ON : jv_OFF);
+  #endif      
+  s_AmpPowerOn = true;
+  f_HasChanges = true;
+}
+
+void cmdPowerOFF() {
+// команда сброса конфигурации до состояния по умолчанию и перезагрузка
+  #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+  Serial.printf("Switch power from %s to OFF\n",s_AmpPowerOn ? jv_ON : jv_OFF);
+  #endif      
+  s_AmpPowerOn = false;
+  f_HasChanges = true;  
+}
+
 // ================================== основные задачи времени выполнения =================================
 
-void getCommandTask (void *pvParam) {
-// задача получения команды от датчика, таймера, MQTT, OneWire, кнопок
+void eventHandlerTask (void *pvParam) {
+// задача обработки событий получения команды от датчика, таймера, MQTT, OneWire, кнопок
 
   while (true) {
+    //-------------------- обработка команд задержки и таймера ------------
+    // --- обработка флага мигания ---
+    if (millis()-tm_LastBlinkFire > C_BLINKER_DELAY) {  // переключаем блинкер по задержке 
+      f_Blinker = !f_Blinker;
+      tm_LastBlinkFire = millis();
+    } 
+
+
     //--- обработка событий получения MQTT команд в приложение 
     if ( f_HasMQTTCommand ) {                                         // превращаем события MQTT в команды для отработки приложением    
       // защищаем секцию работы с Static JSON DOC с помощью мьютекса
@@ -539,6 +592,16 @@ void getCommandTask (void *pvParam) {
       if (InputJSONdoc.containsKey(jc_REPORT) and InputJSONdoc[jc_REPORT])  {   // послана команда принудительного отчета
         f_HasReportNow = true;                                       // взводим флаг, что отчёт нужен сейчас
       }
+      // MQTT: power on|off
+      if (InputJSONdoc.containsKey(jk_POWER))  {   // послана команда включения/выключения блока
+        if ((InputJSONdoc[jk_POWER] == jv_ON) and !s_AmpPowerOn)  cmdPowerON();   // если блок выключен и пришла команда включения
+        if ((InputJSONdoc[jk_POWER] == jv_OFF) and s_AmpPowerOn)  cmdPowerOFF();  // если блок включен и пришла команда выключения     
+      }
+      // MQTT: input selector rca|xlr
+      if (InputJSONdoc.containsKey(jk_SELECTOR))  {   // послана команда переключения входа 
+        if ((InputJSONdoc[jk_SELECTOR] == jv_RCA) and s_AmpPowerOn)  cmdSwitchInput(INP_RCA);  // команда переключения на RCA
+        if ((InputJSONdoc[jk_SELECTOR] == jv_XLR) and s_AmpPowerOn)  cmdSwitchInput(INP_XLR);  // команда переключения на XLR
+      }
 
       // TODO: прочие команды из MQTT
 
@@ -552,22 +615,18 @@ void getCommandTask (void *pvParam) {
     bttn_light.tick();                                                // опрашиваем кнопку LIGHT  
     // однократное нажатие на кнопку POWER
     if (bttn_power.isSingle()) {        
-
-     // TODO: включаем/выключаем усилитель
-
+      if (s_AmpPowerOn) cmdPowerOFF();                                // если блок включен и пришла команда выключения     
+        else cmdPowerON();                                            // если блок выключен и пришла команда включения
     }
     // однократное нажатие на кнопку выбора входа
     if (bttn_input.isSingle()) {        
       if (s_AmpPowerOn) {                                             // все действия, если усь включен
-        curConfig.inp_selector = !curConfig.inp_selector;
-        f_HasChanges = true;                                          // взводим флаг применения изменений
+        cmdSwitchInput(!curConfig.inp_selector);                      // переключаемся на противоположный вход RCA<>XLR
       }
     }
     // однократное нажатие на кнопку переключения освещения
-    if (bttn_light.isSingle()) {        
-
-     // TODO: по кругу переключаем режим освещения
-
+    if (bttn_light.isSingle()) { 
+      cmdChangeVUlightMode();                                         // по кругу переключаем режим освещения       
     }
     // одновременное нажатие и удержание кнопок Power и Input  
     // команда сброса конфигурации до заводских параметров и перезагрузка
@@ -580,19 +639,51 @@ void getCommandTask (void *pvParam) {
 }
 
 void applayChangesTask (void *pvParam) {
-// применяем изменений, и если нужно сохранение состояния в FLASH памяти
+// применяем изменения состояния, и если нужно сохранение состояния в FLASH памяти
+// здесь отражаются внутренние изменения, команды выполняются в процедуре обработки команд eventHandlerTask
   while (true) {
-    
+    // в начале исполняем обработку изменений без учёта флага f_HasChanges
     if (s_CurrentWIFIMode == WF_IN_WORK ) {  
       // выключаем светодиод установления связи по WiFi и MQTT при нормально установленном соединении
       digitalWrite(LED_POWER_BLUE_PIN,LOW); 
     }
-    if (s_CurrentWIFIMode == WF_AP ) {  
-      // включаем мигающий режим светодиода индицирующего работу по WiFi в режиме точки доступа
+    if (s_AmpPowerOn) {
+      // отображаем индикацию включения модуля
+      digitalWrite(LED_POWER_GREEN_PIN,HIGH);
+      digitalWrite(LED_POWER_RED_PIN,LOW);
+      // отображаем селектор входов
+      digitalWrite(LED_SELECTOR_RCA_PIN,curConfig.inp_selector); 
+      digitalWrite(LED_SELECTOR_XLR_PIN,!curConfig.inp_selector);
+      } 
+    else {
+      // отображаем индикацию выключения модуля
+      digitalWrite(LED_POWER_GREEN_PIN,LOW);
+      digitalWrite(LED_POWER_RED_PIN,HIGH);
+      // выключаем селектор входов        
+      digitalWrite(LED_SELECTOR_RCA_PIN,LOW); 
+      digitalWrite(LED_SELECTOR_XLR_PIN,LOW);
+    }
+    // проверяем текущее состояние работы c WiFi
+    switch (s_CurrentWIFIMode) {
+      case WF_AP: // включаем мигающий режим светодиода индицирующего работу по WiFi в режиме точки доступа
+        digitalWrite(LED_POWER_BLUE_PIN,f_Blinker);
+        break;
+      case WF_IN_WORK: // при нормально установленном соединении светодиод управляется в циклах приема и отправки сообщений        
+        break;        
+      case WF_OFF:     // выключаем светодиод при полном отключении WiFi
+        digitalWrite(LED_POWER_BLUE_PIN,LOW); 
+        break;    
+      default:    // по умолчанию включаем светодиод
+        digitalWrite(LED_POWER_BLUE_PIN,HIGH);
+        break;
+    }
+    // ----- ниже исполняется только то, что отмечено флагом изменений f_HasChanges ----
+    if (f_HasChanges) {
+      
+      // TODO: применяем изменения отмеченные флагом
 
-      // TODO: мигаем
-
-    };
+      f_HasChanges = false;
+    }
     vTaskDelay(1/portTICK_PERIOD_MS); 
   }
 }
@@ -650,7 +741,6 @@ void reportTask (void *pvParam) {
   }
 }
 
-
 // -------------------------- в этом фрагменте описываем call-back функции MQTT клиента --------------------------------------------
 void onMqttConnect(bool sessionPresent) {   
   // обработчик подключения к MQTT
@@ -674,7 +764,7 @@ void onMqttDisconnect(AsyncMqttClientDisconnectReason reason) {
   #ifdef DEBUG_LEVEL_PORT                                                                           
     Serial.println("Disconnected from MQTT.");                      // если отключились от MQTT
   #endif         
-  s_CurrentWIFIMode = WF_OFF;                                       // переходим в режим полного реконнекта по WiFi
+  s_CurrentWIFIMode = WF_UNKNOWN;                                   // переходим в режим полного реконнекта по WiFi
 }
 
 void onMqttSubscribe(uint16_t packetId, uint8_t qos) {
@@ -703,8 +793,8 @@ void onMqttPublish(uint16_t packetId) {
 void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties properties, size_t len, size_t index, size_t total) {
   String messageTemp;
   
-  for (int i = 0; i < len; i++) {                       // преобразуем полученные в сообщении данные в строку
-    messageTemp += (char)payload[i];
+  for (int i = 0; i < len; i++) {                       // преобразуем полученные в сообщении данные в строку при этом выкидываем символы кавычек
+      messageTemp += (char)payload[i];
   }
   messageTemp[len] = '\0';  
   // проверяем, что мы получили MQTT сообщение в командном топике
@@ -723,7 +813,8 @@ void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties 
     // отдадим семафор обработки документа только после преобразования JSON документа в команды
   }
   #ifdef DEBUG_LEVEL_PORT         
-    Serial.printf("Publish received.\n  topic: %s\n  message: [%s]\n", topic, messageTemp);
+  Serial.printf("Publish received.\n  topic: %s\n  message: [", topic);
+  Serial.print(messageTemp); Serial.println("]");
   #endif
 }
 
@@ -793,7 +884,6 @@ void setup() {
   digitalWrite(LED_SELECTOR_XLR_PIN, LOW);  
 
   // инициализируем шину 1Wire BUS
-
   if (!OneWireBus.InitializeBus(ONE_WIRE_PIN,BROADCAST_ADDR,OneWireCycle,sizeof(SyncBUSParams))){   // инициализируем шину OneWire
      Serial.println("Ошибка инициализации шины OneWireBUS!");
   }
@@ -820,7 +910,6 @@ void setup() {
   s_EnableEEPROM = EEPROM.begin(sizeof(curConfig));   // инициализируем работу с EEPROM 
 
 #ifdef DEBUG_LEVEL_PORT    
-
   if (s_EnableEEPROM) {  // если инициализация успешна - то:   
     if (ReadEEPROMConfig()) { // читаем конфигурацию из EEPROM и проверяем контрольную сумму для блока данных
       // контрольная сумма блока данных верна - используем его в качестве конфигурации
@@ -854,10 +943,8 @@ void setup() {
     Serial.printf("---\n\n");
   }
   else { Serial.println("Warning! Блок работает без сохранения конфигурации !!!"); 
-  }
-  
+  } 
 #else
-
   if (s_EnableEEPROM) {  // если инициализация успешна - то:   
     if (!ReadEEPROMConfig()) { // читаем конфигурацию из EEPROM и проверяем контрольную сумму для блока данных
       // если контрольная сумма данных не сошлась - считаем блок испорченным, инициализируем и перезаписываем его
@@ -865,8 +952,7 @@ void setup() {
       EEPROM.put(0,curConfig);     
       EEPROM.commit();
     }
-  }
-  
+  } 
 #endif  
 
   // настраиваем MQTT клиента
@@ -883,16 +969,10 @@ void setup() {
   // настраиваем семафоры - сбрасываем их
   xSemaphoreGive( sem_InputJSONdoc );
 
-  // обнуляем все отметки времени для правильного их отсчёта
-  tm_LastAmbientCheck = 0;
-  tm_LastBrightnessSet = 0;
-  tm_LastReportToMQTT = 0;
-  tm_PowerOn = 0;
-
   // создаем отдельные параллельные задачи, выполняющие группы функций  
   // стартуем основные задачи
-  if (xTaskCreate(getCommandTask, "command", 4096, NULL, 1, NULL) != pdPASS) {  // все плохо, задачу не создали
-    Halt("Error: Get command task not created!");
+  if (xTaskCreate(eventHandlerTask, "events", 4096, NULL, 1, NULL) != pdPASS) {  // все плохо, задачу не создали
+    Halt("Error: Event handler task not created!");
   }
   if (xTaskCreate(applayChangesTask, "applay", 4096, NULL, 1, NULL) != pdPASS) { // все плохо, задачу не создали
     Halt("Error: Applay changes task not created!");
@@ -914,10 +994,7 @@ void setup() {
 
 }
 
-
 // не используемый основной цикл
 void loop() {
-
   vTaskDelete(NULL);   // удаляем не нужную задачу loop()  
-
 }
