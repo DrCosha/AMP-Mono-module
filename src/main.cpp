@@ -35,10 +35,15 @@ MQTT соединения нет, то периодически пытаемся
 
 Команды в топике команд:
 
-  {"clear_config"}            - очистить Flash память и загрузится с конфигурацией по умолчанию
-  {"reset"}                   - перезагрузить контроллер управления усилителем 
-  {"report"}                  - сформировать отчет о текущем состоянии в топик REPORT  
-  {"power":"on"|"off"}        - включить, выключить модуль
+  {"clear_config"}                          - очистить Flash память и загрузится с конфигурацией по умолчанию
+  {"reset"}                                 - перезагрузить контроллер управления усилителем 
+  {"report"}                                - сформировать отчет о текущем состоянии в топик REPORT  
+  {"power":"on"|"off"}                      - включить/выключить модуль
+  {"input":"rca"|"xlr"}                     - выбор входа для усилителя  
+  {"trigger_out_enable":"on"|"off"}         - разрешить работу выходного триггера
+  {"owb_sync":"on"|"off"}                   - разрешение синхронизации по OneWireBUS
+  {"bypass":"on"|"off"}                     - разрешение прямой проброски триггерного сигнала с входа на выход
+  {"vu_light": "auto"|"on_low"|"on_middle"|"on_high"|"off"}  - режим работы подсветки VU индикатора    
 
 */
 
@@ -143,7 +148,11 @@ extern "C" {
 #define jk_BRIGHTNESS     "vu_brightness"         // ключ описания значения яркости подсветки
 #define jk_AMBIENT        "ambient"               // ключ описания значения датчика освещенности
 #define jk_TRIGGER_IN     "trigger_in"            // ключ описания значения входа триггера
+#define jk_TRG_OUT_ENABLE "trigger_out_enable"    // ключ описания разрешения работы выхода триггера
+#define jk_TRIGGER_OUT    "trigger_out"           // ключ описания значения выхода триггера
 #define jk_TRIGGER_BYPASS "bypass"                // ключ описания режима проброса триггерного входа
+#define jk_SYNC_BY_OWB    "owb_sync"              // ключ описания режима синхронизации по OneWireBUS
+
 
 // --- значения ключей и команд ---
 #define jv_ONLINE         "online"                // 
@@ -157,14 +166,7 @@ extern "C" {
 #define jv_MAX            "max"                   //
 
 // тип описывающий режим работы подсветки индикатора  
-enum VU_mode_t : uint8_t {
-  VL_AUTO,          // автоматический режим подсветки по датчику
-  VL_ON_LOW,        // минимальный уровень подсветки
-  VL_ON_MIDDLE,     // средний уровень подсветки
-  VL_ON_HIGH,       // максимальный уровень подсветки
-  VL_OFF            // подсветка выключена
-};                                    
-
+#define MAX_VU_MODE 5                             // максимальное количество режимов подсветки  
 const char* VU_mode_str[]  = {
   "auto",           // автоматический режим подсветки по датчику
   "on_low",         // минимальный уровень подсветки
@@ -184,12 +186,18 @@ enum WiFi_mode_t : uint8_t {
   WF_IN_WORK        // все хорошо, работаем
 };  
 
+// значения базовых параметров по умолчанию
+#define C_DEF_ENABLE_TRIGGER_OUT true           // по умолчанию, выходной триггер включен
+#define C_DEF_SYNC_TRIGGER_OUT true             // синхронизация входного и выходного триггера включена
+#define C_DEF_SYNC_BY_ONEWIREBUS true           // синхронизация модулей через OneWireBUS
+
 // структура данных хранимых в EEPROM
 struct GlobalParams {
 // параметры режима работы усилителя
   bool            inp_selector;                 // выбранный режим входа ( INP_RCA / INP_XLR )
-  VU_mode_t       vu_light_mode;                // режим работы подсветки индикатора  
+  uint8_t         vu_light_mode;                // режим работы подсветки индикатора  
   bool            sync_trigger_in_out;          // режим прямой проброски триггерного входа на выход
+  bool            enable_trigger_out;           // разрешено управление выходным триггером
   bool            sync_by_owb;                  // синхронизация по OneWireBus
 // параметры подключения к MQTT и WiFi  
   char            wifi_ssid[20];                // строка SSID сети WiFi
@@ -313,7 +321,10 @@ void SetConfigByDefault() {
 // ------------------- устанавливаем значения в блоке конфигурации по умолчанию --------------  
       memset((void*)&curConfig,0,sizeof(curConfig));    // обнуляем область памяти и заполняем ее значениями по умолчанию
       curConfig.inp_selector = INP_XLR;                                              // по умолчанию XLR
-      curConfig.vu_light_mode = VL_AUTO;                                             // значение auto     
+      curConfig.vu_light_mode = 0;                                                   // значение auto     
+      curConfig.enable_trigger_out = C_DEF_ENABLE_TRIGGER_OUT;                       // разрешение работы Trigger_OUT
+      curConfig.sync_trigger_in_out = C_DEF_SYNC_TRIGGER_OUT;                        // синхронизация Trigger_OUT = Trigger_IN
+      curConfig.sync_by_owb = C_DEF_SYNC_BY_ONEWIREBUS;                              // синхронизация модулей через OneWireBUS
       memcpy(curConfig.wifi_ssid,P_WIFI_SSID,sizeof(P_WIFI_SSID));                   // сохраняем имя WiFi сети по умолчанию      
       memcpy(curConfig.wifi_pwd,P_WIFI_PASSWORD,sizeof(P_WIFI_PASSWORD));            // сохраняем пароль к WiFi сети по умолчанию
       memcpy(curConfig.mqtt_usr,P_MQTT_USER,sizeof(P_MQTT_USER));                    // сохраняем имя пользователя MQTT сервера по умолчанию
@@ -440,7 +451,10 @@ void wifiTask(void *pvParam) {
         vTaskDelay(pdMS_TO_TICKS(500)); 
       } 
       // цикл окончен, проверяем есть ли соединение с MQTT
-      if (mqttClient.connected()) { s_CurrentWIFIMode = WF_IN_WORK;  }     // если да - то пеерходим в режим нормальной работы
+      if (mqttClient.connected()) {                                   // если да - то переходим в режим нормальной работы
+          s_CurrentWIFIMode = WF_IN_WORK;  
+          f_HasReportNow = true;                                      // рапортуем в MQTT текущим состоянием
+        }  
         else {
           s_CurrentWIFIMode = WF_AP;                                  // иначе - уходим в режим AP проблема с окружением или конфигурацией - нужно поднимать точку доступа
           #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода
@@ -542,9 +556,33 @@ void cmdSwitchInput(const bool InpMode) { // команда переключен
   }
 }
 
-void cmdChangeVUlightMode() {
+void cmdEnableTriggerOut(const bool _Mode) { 
+// разрешение работы триггерного выхода
+
+ // TODO: ...
+
+}
+
+void cmdEnableOWBSync(const bool _Mode) { 
+// разрешение синхронизации по OneWireBUS
+
+ // TODO: ...
+
+}
+
+void cmdTriggerByPass(const bool _Mode) { 
+// разрешение сквозной синхронизации триггеров
+
+ // TODO: ...
+
+}
+
+void cmdChangeVULightMode(const char * _Mode) {
 // по кругу переключаем режим освещения       
 
+ // TODO: ...
+   
+  f_HasReportNow = true;
 }
 
 void cmdPowerON() {
@@ -571,7 +609,8 @@ void cmdPowerOFF() {
 // команда сброса конфигурации до состояния по умолчанию и перезагрузка
   #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
   Serial.printf("Switch power from %s to OFF\n",s_AmpPowerOn ? jv_ON : jv_OFF);
-  #endif      
+  #endif    
+  CheckAndUpdateEEPROM();                               // запоминаем текущую конфигурацию  
   s_AmpPowerOn = false;
   f_HasChanges = true;  
   f_HasReportNow = true;  
@@ -583,15 +622,13 @@ void eventHandlerTask (void *pvParam) {
 // задача обработки событий получения команды от датчика, таймера, MQTT, OneWire, кнопок
 
   while (true) {
-    //-------------------- обработка команд задержки и таймера ------------
-    // --- обработка флага мигания ---
+    //-------------------- обработка команд задержки и таймера ---------------------------------------
+    // обработка флага мигания
     if (millis()-tm_LastBlinkFire > C_BLINKER_DELAY) {  // переключаем блинкер по задержке 
       f_Blinker = !f_Blinker;
       tm_LastBlinkFire = millis();
     } 
-
-
-    //--- обработка событий получения MQTT команд в приложение 
+    //-------------------- обработка событий получения MQTT команд в приложение ----------------------
     if ( f_HasMQTTCommand ) {                                         // превращаем события MQTT в команды для отработки приложением    
       // защищаем секцию работы с Static JSON DOC с помощью мьютекса
       // MQTT: clear_config
@@ -616,6 +653,28 @@ void eventHandlerTask (void *pvParam) {
         if ((InputJSONdoc[jk_SELECTOR] == jv_RCA) and s_AmpPowerOn)  cmdSwitchInput(INP_RCA);  // команда переключения на RCA
         if ((InputJSONdoc[jk_SELECTOR] == jv_XLR) and s_AmpPowerOn)  cmdSwitchInput(INP_XLR);  // команда переключения на XLR
       }
+      // MQTT: разрешение работы выходного триггера on|off
+      if (InputJSONdoc.containsKey(jk_TRG_OUT_ENABLE))  {   // послана команда включения/выключения выходного триггера
+        if (InputJSONdoc[jk_TRG_OUT_ENABLE] == jv_ON) cmdEnableTriggerOut(true);              // разрешаем выходной триггер
+        if (InputJSONdoc[jk_TRG_OUT_ENABLE] == jv_OFF) cmdEnableTriggerOut(false);            // запрещаем выходной триггер
+      }
+      // MQTT: разрешение синхронизации по OneWireBUS on|off
+      if (InputJSONdoc.containsKey(jk_SYNC_BY_OWB))  {   // послана команда включения/выключения синхронизации по OneWireBUS
+        if (InputJSONdoc[jk_SYNC_BY_OWB] == jv_ON) cmdEnableOWBSync(true);                   // разрешаем синхронизацию по OneWireBUS
+        if (InputJSONdoc[jk_SYNC_BY_OWB] == jv_OFF) cmdEnableOWBSync(false);                 // запрещаем синхронизацию по OneWireBUS
+      }
+      // MQTT: разрешение сквозной синхронизации триггеров
+      if (InputJSONdoc.containsKey(jk_TRIGGER_BYPASS))  {   // послана команда включения/выключения синхронизации триггеров
+        if (InputJSONdoc[jk_TRIGGER_BYPASS] == jv_ON) cmdTriggerByPass(true);                // разрешаем синхронизацию триггеров
+        if (InputJSONdoc[jk_TRIGGER_BYPASS] == jv_OFF) cmdTriggerByPass(false);              // запрещаем синхронизацию триггеров
+      }
+      // MQTT: переключение режима освещенности VU индикатора
+      if (InputJSONdoc.containsKey(jk_LIGHT_MODE))  {   // послана команда переключения режима освещенности VU индикатора
+        const char* _VU_Mode = InputJSONdoc[jk_TRIGGER_BYPASS];
+        cmdChangeVULightMode(_VU_Mode) ;                              // переключаем режим
+      }
+
+
 
       // TODO: прочие команды из MQTT
 
@@ -639,8 +698,10 @@ void eventHandlerTask (void *pvParam) {
       }
     }
     // однократное нажатие на кнопку переключения освещения
-    if (bttn_light.isSingle()) { 
-      cmdChangeVUlightMode();                                         // по кругу переключаем режим освещения       
+    if (bttn_light.isSingle() and s_AmpPowerOn) { 
+      if (curConfig.vu_light_mode==(MAX_VU_MODE-1)) curConfig.vu_light_mode = 0;   
+        else curConfig.vu_light_mode++;
+      cmdChangeVULightMode(VU_mode_str[curConfig.vu_light_mode]);     // переключаем на нужный режим освещения       
     }
     // одновременное нажатие и удержание кнопок Power и Input  
     // команда сброса конфигурации до заводских параметров и перезагрузка
@@ -691,6 +752,17 @@ void applayChangesTask (void *pvParam) {
         digitalWrite(LED_POWER_BLUE_PIN,HIGH);
         break;
     }
+
+    // обслуживание триггерного выхода - TRIGGER_OUT
+    if (curConfig.enable_trigger_out) { // если разрешена работа внешнего TRIGGER_OUT то:
+      // если включен режим прямой трансляции сигнала Trigger - то просто дублируем сигнал входа на выходе
+      if (curConfig.sync_trigger_in_out) {  // при этом переворачиваем сигнал, так как Trigger_IN - инверсный
+        if (digitalRead(TRIGGER_IN_PIN)) { digitalWrite(TRIGGER_OUT_PIN, LOW);}     // выключаем порт выхода TRIGGER_OUT  
+          else {digitalWrite(TRIGGER_OUT_PIN, HIGH);}                                // включаем порт выхода TRIGGER_OUT  
+        }
+      else digitalWrite(TRIGGER_OUT_PIN, s_AmpPowerOn);  // иначе выход Trigger_OUT поднимаем, когда включен усилитель и разрешен Trigger_OUT
+      }  
+    else digitalWrite(TRIGGER_OUT_PIN, LOW);  // если внешний триггер запрещен - держим его выключенным
     // ----- ниже исполняется только то, что отмечено флагом изменений f_HasChanges ----
     if (f_HasChanges) {
       
@@ -726,9 +798,12 @@ void reportTask (void *pvParam) {
         OutputJSONdoc[jk_SELECTOR] = curConfig.inp_selector ? jv_XLR : jv_RCA;                      // режим входа RCA / XLR
         OutputJSONdoc[jk_LIGHT_MODE] = VU_mode_str[curConfig.vu_light_mode];                        // режим подсветки VU индикатора
         OutputJSONdoc[jk_BRIGHTNESS] = v_GoalBrightness;                                            // значение целевой яркости подсветки
-        OutputJSONdoc[jk_AMBIENT] = v_CurrAmbient;                                                  // ключ описания значения датчика освещенности
-        OutputJSONdoc[jk_TRIGGER_IN] = v_TriggerIN ? jv_ON : jv_OFF;                                // ключ описания значения входа триггера
-        OutputJSONdoc[jk_TRIGGER_BYPASS] = curConfig.sync_trigger_in_out ? jv_ON : jv_OFF;          // ключ описания режима проброса триггерного входа
+        OutputJSONdoc[jk_AMBIENT] = v_CurrAmbient;                                                  // значение датчика освещенности
+        OutputJSONdoc[jk_TRIGGER_IN] = v_TriggerIN ? jv_ON : jv_OFF;                                // состояние входа триггера
+        OutputJSONdoc[jk_TRG_OUT_ENABLE] = curConfig.enable_trigger_out ? jv_ON : jv_OFF;           // разрешение на работу триггерного выхода 
+        OutputJSONdoc[jk_TRIGGER_OUT] = digitalRead(TRIGGER_OUT_PIN) ? jv_ON : jv_OFF;              // состояние триггерного выхода 
+        OutputJSONdoc[jk_TRIGGER_BYPASS] = curConfig.sync_trigger_in_out ? jv_ON : jv_OFF;          // проброс триггерного входа на выход
+        OutputJSONdoc[jk_SYNC_BY_OWB] = curConfig.sync_by_owb ? jv_ON : jv_OFF;                     // синхронизация по OneWireBUS
         // серилизуем в строку
         String tmpPayload;
         serializeJson(OutputJSONdoc, tmpPayload);
@@ -746,8 +821,11 @@ void reportTask (void *pvParam) {
         Serial.printf("%s : %d\n", jk_BRIGHTNESS, v_GoalBrightness );
         Serial.printf("%s : %d\n", jk_AMBIENT, v_CurrAmbient );
         Serial.printf("%s : %s\n", jk_TRIGGER_IN, v_TriggerIN ? jv_ON : jv_OFF );
+        Serial.printf("%s : %s\n", jk_TRG_OUT_ENABLE, curConfig.enable_trigger_out ? jv_ON : jv_OFF);
+        Serial.printf("%s : %s\n", jk_TRIGGER_OUT, digitalRead(TRIGGER_OUT_PIN) ? jv_ON : jv_OFF);
         Serial.printf("%s : %s\n", jk_TRIGGER_BYPASS, curConfig.sync_trigger_in_out ? jv_ON : jv_OFF );
-        Serial.println("<<<<>>>>");
+        Serial.printf("%s : %s\n", jk_SYNC_BY_OWB, curConfig.sync_by_owb ? jv_ON : jv_OFF );
+        Serial.println("<<<< End of current report >>>>");
       #endif                
       tm_LastReportToMQTT = millis();           // взводим интервал отсчёта
       f_HasReportNow = false;                   // сбрасываем флаг
