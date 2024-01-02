@@ -104,6 +104,7 @@ extern "C" {
 #define C_WIFI_AP_WAIT 180000                   // таймуат поднятой AP без соединения с клиентами (после этого опять пытаемся подключится как клиент) (180 сек)
 #define C_WIFI_CYCLE_WAIT 10000                 // таймуат цикла переустановки соединения с WiFi (10 сек)
 #define C_BLINKER_DELAY 800                     // задержка переключения блинкера
+#define C_TRIGGER_IN_DEBOUNCE 200               // задержка устранения дребезга сигнала TriggerIn - нужна для подавления переходных процессов включения стойки аппаратуры
 
 // задержки в формировании MQTT отчета
 
@@ -187,7 +188,7 @@ enum WiFi_mode_t : uint8_t {
 };  
 
 // значения базовых параметров по умолчанию
-#define C_DEF_ENABLE_TRIGGER_OUT true           // по умолчанию, выходной триггер включен
+#define C_DEF_ENABLE_TRIGGER true               // по умолчанию, через работа с триггерами разрешена
 #define C_DEF_SYNC_TRIGGER_OUT true             // синхронизация входного и выходного триггера включена
 #define C_DEF_SYNC_BY_ONEWIREBUS true           // синхронизация модулей через OneWireBUS
 
@@ -197,7 +198,7 @@ struct GlobalParams {
   bool            inp_selector;                 // выбранный режим входа ( INP_RCA / INP_XLR )
   uint8_t         vu_light_mode;                // режим работы подсветки индикатора  
   bool            sync_trigger_in_out;          // режим прямой проброски триггерного входа на выход
-  bool            enable_trigger_out;           // разрешено управление выходным триггером
+  bool            enable_triggers;              // разрешено управление через триггера
   bool            sync_by_owb;                  // синхронизация по OneWireBus
 // параметры подключения к MQTT и WiFi  
   char            wifi_ssid[20];                // строка SSID сети WiFi
@@ -245,6 +246,8 @@ uint32_t tm_LastAmbientCheck = 0;               // последний момен
 uint32_t tm_LastBrightnessSet = 0;              // последний момент установки яркости индикатора
 uint32_t tm_LastReportToMQTT = 0;               // время последнего отчета в MQTT
 uint32_t tm_LastBlinkFire = 0;                  // время последнего переключения флага блинкера
+uint32_t tm_TriggerDebounceTime = 0;            // время момента изменения сигнала TriggerIN
+
 uint32_t cur_MQTT_REPORT_DELAY = C_MQTT_REPORT_DELAY_OFF;     // по умолчанию значение равно задержке выключенного блока
 
 // общие флаги программы - команды и изменения 
@@ -252,6 +255,7 @@ bool f_HasMQTTCommand = false;                  // флаг получения M
 bool f_HasChanges = false;                      // флаг наличия изменений
 bool f_HasReportNow = false;                    // флаг формирования отчёта "прямо сейчас"
 bool f_Blinker = false;                         // флаг "мигания" - переключается с задержкой C_BLINKER_DELAY
+bool f_TriggerDebounce = false;                 // флаг нахождения в режиме устранения дребезга по триггерному входу
 
 // переменные управления яркостью индикатора
 uint16_t  v_CurrAmbient = 0;                    // усредненная величина текущей яркости окружающенго освещения
@@ -322,7 +326,7 @@ void SetConfigByDefault() {
       memset((void*)&curConfig,0,sizeof(curConfig));    // обнуляем область памяти и заполняем ее значениями по умолчанию
       curConfig.inp_selector = INP_XLR;                                              // по умолчанию XLR
       curConfig.vu_light_mode = 0;                                                   // значение auto     
-      curConfig.enable_trigger_out = C_DEF_ENABLE_TRIGGER_OUT;                       // разрешение работы Trigger_OUT
+      curConfig.enable_triggers = C_DEF_ENABLE_TRIGGER;                              // разрешение работы через тригерры
       curConfig.sync_trigger_in_out = C_DEF_SYNC_TRIGGER_OUT;                        // синхронизация Trigger_OUT = Trigger_IN
       curConfig.sync_by_owb = C_DEF_SYNC_BY_ONEWIREBUS;                              // синхронизация модулей через OneWireBUS
       memcpy(curConfig.wifi_ssid,P_WIFI_SSID,sizeof(P_WIFI_SSID));                   // сохраняем имя WiFi сети по умолчанию      
@@ -682,7 +686,7 @@ void eventHandlerTask (void *pvParam) {
       InputJSONdoc.clear();                                           // очищаем входной документ
       xSemaphoreGive(sem_InputJSONdoc);                               // отпускаем семафор обработки входного сообщения
     }
-    //--- опрос кнопок - получение команд от лицевой панели 
+    //--------------------- опрос кнопок - получение команд от лицевой панели ------------------------
     bttn_power.tick();                                                // опрашиваем кнопку POWER
     bttn_input.tick();                                                // опрашиваем кнопку INPUT  
     bttn_light.tick();                                                // опрашиваем кнопку LIGHT  
@@ -708,7 +712,44 @@ void eventHandlerTask (void *pvParam) {
     if (bttn_power.isHold() and bttn_input.isHold()) {        
         cmdClearConfig_Reset();
     }
-    // отдаем управление ядру FreeRT OS
+    //----------------------------- получение команды по Trigger IN ----------------------------------
+    if (curConfig.enable_triggers) {  // если работа по триггерам разрешена
+
+      // Ловим событие перехода входного триггера из 1 в 0 >> команда включения по триггеру
+      // Ловим событие перехода входного триггера из 0 в 1 >> команда выключения по триггеру
+
+      // Если s_AmpPowerOn = OFF и приходит команда включения - то включаем усилитель и выставляем флаг включения по Trigger_In
+      // иначе флаг не взводим
+
+      // Если s_AmpPowerOn = ON  и флаг включения по триггеру взведен и приходит команда выключения - то выключаем усилитель
+      // иначе игнорируем команду
+/*
+  // проверяем вход TRIGGER_IN - и устраняем дребезг на нем
+  if ((TriggerIn == digitalRead(TRIGGER_IN_PIN)) and !TriggerDebounce) { // произошло изменение на входе триггера и мы не в режиме устранения дребезга - то переходим в него
+      TriggerDebounce = true; 
+      TriggerDebounceTime = millis();     // запоминаем время первого изменения состояния TriggerIn      
+  }
+
+  // проверяем наступление момента окончания проверки состояния сигнала TriggerIn
+  if ( TriggerDebounce and ((millis()-TriggerDebounceTime) > C_TRIGGER_IN_DEBOUNCE)) {  // пора обрабатывать текущее состояние TriggerIn    
+    // сбрасывем режим антидребезга
+    TriggerDebounce = false; 
+    TriggerDebounceTime = 0;    
+    // вот теперь можно окончательно считывать и обрабатывать сигнал TriggerIn
+    // проверяем вход TRIGGER_IN
+    tmp_TriggerIn = !digitalRead(TRIGGER_IN_PIN);               // на входе инвертированный сигнал 
+    if (TriggerIn != tmp_TriggerIn) {                           // произошли изменения - нужна обработка
+      if (TriggerIn and !tmp_TriggerIn) PowerONState = false;   // если идет переключение с 1>>0 входа Trigger IN, то выключаем усь
+      if (!TriggerIn and tmp_TriggerIn) PowerONState = true;    // если идет переключение с 0>>1 входа Trigger IN, то включаем усь  
+      TriggerIn = tmp_TriggerIn;           // назначаем текущее состояние основной переменной
+      SetDefaultBrightness();    
+      HasChanges = true;                   // имеем изменения для реакции
+    } 
+  }
+*/
+
+    }      
+  // отдаем управление ядру FreeRT OS
     vTaskDelay(1/portTICK_PERIOD_MS); 
   }
 }
@@ -754,7 +795,7 @@ void applayChangesTask (void *pvParam) {
     }
 
     // обслуживание триггерного выхода - TRIGGER_OUT
-    if (curConfig.enable_trigger_out) { // если разрешена работа внешнего TRIGGER_OUT то:
+    if (curConfig.enable_triggers) { // если разрешена работа внешних триггеров то:
       // если включен режим прямой трансляции сигнала Trigger - то просто дублируем сигнал входа на выходе
       if (curConfig.sync_trigger_in_out) {  // при этом переворачиваем сигнал, так как Trigger_IN - инверсный
         if (digitalRead(TRIGGER_IN_PIN)) { digitalWrite(TRIGGER_OUT_PIN, LOW);}     // выключаем порт выхода TRIGGER_OUT  
@@ -800,7 +841,7 @@ void reportTask (void *pvParam) {
         OutputJSONdoc[jk_BRIGHTNESS] = v_GoalBrightness;                                            // значение целевой яркости подсветки
         OutputJSONdoc[jk_AMBIENT] = v_CurrAmbient;                                                  // значение датчика освещенности
         OutputJSONdoc[jk_TRIGGER_IN] = v_TriggerIN ? jv_ON : jv_OFF;                                // состояние входа триггера
-        OutputJSONdoc[jk_TRG_OUT_ENABLE] = curConfig.enable_trigger_out ? jv_ON : jv_OFF;           // разрешение на работу триггерного выхода 
+        OutputJSONdoc[jk_TRG_OUT_ENABLE] = curConfig.enable_triggers ? jv_ON : jv_OFF;              // разрешение триггерных выходов/выходов 
         OutputJSONdoc[jk_TRIGGER_OUT] = digitalRead(TRIGGER_OUT_PIN) ? jv_ON : jv_OFF;              // состояние триггерного выхода 
         OutputJSONdoc[jk_TRIGGER_BYPASS] = curConfig.sync_trigger_in_out ? jv_ON : jv_OFF;          // проброс триггерного входа на выход
         OutputJSONdoc[jk_SYNC_BY_OWB] = curConfig.sync_by_owb ? jv_ON : jv_OFF;                     // синхронизация по OneWireBUS
@@ -821,7 +862,7 @@ void reportTask (void *pvParam) {
         Serial.printf("%s : %d\n", jk_BRIGHTNESS, v_GoalBrightness );
         Serial.printf("%s : %d\n", jk_AMBIENT, v_CurrAmbient );
         Serial.printf("%s : %s\n", jk_TRIGGER_IN, v_TriggerIN ? jv_ON : jv_OFF );
-        Serial.printf("%s : %s\n", jk_TRG_OUT_ENABLE, curConfig.enable_trigger_out ? jv_ON : jv_OFF);
+        Serial.printf("%s : %s\n", jk_TRG_OUT_ENABLE, curConfig.enable_triggers ? jv_ON : jv_OFF);
         Serial.printf("%s : %s\n", jk_TRIGGER_OUT, digitalRead(TRIGGER_OUT_PIN) ? jv_ON : jv_OFF);
         Serial.printf("%s : %s\n", jk_TRIGGER_BYPASS, curConfig.sync_trigger_in_out ? jv_ON : jv_OFF );
         Serial.printf("%s : %s\n", jk_SYNC_BY_OWB, curConfig.sync_by_owb ? jv_ON : jv_OFF );
