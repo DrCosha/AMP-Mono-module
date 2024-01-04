@@ -43,7 +43,7 @@ MQTT соединения нет, то периодически пытаемся
   {"trigger_enable":"on"|"off"}             - разрешить/запретить работу триггеров
   {"owb_sync":"on"|"off"}                   - разрешение синхронизации по OneWireBUS
   {"bypass":"on"|"off"}                     - разрешение прямой проброски триггерного сигнала с входа на выход
-  {"vu_light": "auto"|"on_low"|"on_middle"|"on_high"|"off"}  - режим работы подсветки VU индикатора 
+  {"vu_light": "off"|"on_low"|"on_middle"|"on_high"|"auto"}  - режим работы подсветки VU индикатора 
   {"light_set": [<value1>,<value2>,<value3>]}                - значения PWM для подстройки яркости освещения в режимах "on_low","on_middle","on_high"
   {"light_auto": [<min_value>,<max_value>]}                  - значения PWM для подстройки границ изменения автоматической яркости
   {"ambient": [<min_value>,<max_value>]}                     - подстройка границ входного сигнала сенсора освещенности
@@ -112,36 +112,37 @@ extern "C" {
 #define C_TRIGGER_OFF_DEBOUNCE 1000               // задержка устранения дребезга сигнала TriggerIn при выключении - нужна для подавления переходных процессов включения стойки аппаратуры
 
 // задержки в формировании MQTT отчета
-
 #define C_MQTT_REPORT_DELAY_ON    30000           // 30 секунд для включенного блока
 #define C_MQTT_REPORT_DELAY_OFF  1800000          // 30 минут для выключенного 
 
 // определяем константы для уровней сигнала
-#define C_MAX_PWM_VALUE 1000                      // максимальное значение яркости при регулировании подсветки
-#define C_MIN_PWM_VALUE 60                        // минимальное значение яркости при регулировании подсветки
-#define C_MAX_SENSOR_VALUE 4000                   // максимальное значение возвращаемое сенсором освещенности
-#define C_MIN_SENSOR_VALUE 0                      // минимальное значение возвращаемое сенсором освещенности
+#define DEF_MAX_AUTO_PWM 1000                     // максимальное значение яркости при авто регулировании подсветки
+#define DEF_MIN_AUTO_PWM 60                       // минимальное значение яркости при авто регулировании подсветки
+#define DEF_MIN_MANUAL_PWM 60                     // минимальное значение PWM для ручного регулирования яркости подсветки
+#define DEF_MID_MANUAL_PWM 120                    // среднее значение PWM для ручного регулирования яркости подсветки
+#define DEF_MAX_MANUAL_PWM 1000                   // максимальное значение PWM для ручного регулирования яркости подсветки
+#define DEF_MAX_AMBIENT_VALUE 4000                // максимальное значение возвращаемое сенсором освещенности
+#define DEF_MIN_AMBIENT_VALUE 0                   // минимальное значение возвращаемое сенсором освещенности
 
+// определяем имена входов 
 #define INP_XLR true                              // константа выбор входа XLR (1)
 #define INP_RCA false                             // константа выбор входа RCA (0)
 
 // начальные параметры устройства для подключения к WiFi и MQTT
-
 #define P_WIFI_SSID "iot_ls"                      // SSID нашей локальной сети  
 #define P_WIFI_PASSWORD "vvssoft40"               // пароль к нашей локальной сети
 #define P_MQTT_USER "mqtt_user"                   // имя пользователя для подключения к MQTT серверу
 #define P_MQTT_PWD "vvssoft40"                    // пароль для подключения к MQTT серверу
 #define P_MQTT_HOST IPAddress(192, 168, 10, 100)  // адрес нашего Mosquito MQTT сервера
 #define P_MQTT_PORT 1883                          // порт нашего Mosquito MQTT сервера
+#define C_MAX_FAILED_TRYS 3                       // количество попыток повтора для поднятия AP точки    
 
+// определяем топики для работы устройства по MQTT
 #define P_LWT_TOPIC   "diy/hires_amp_01/LWT"      // топик публикации доступности устройства
 #define P_SET_TOPIC   "diy/hires_amp_01/set"      // топик публикации команд для устройства
 #define P_STATE_TOPIC "diy/hires_amp_01/state"    // топик публикации состояния устройства
 
-#define C_MAX_FAILED_TRYS 3                       // количество попыток повтора для поднятия AP точки    
-
 // определяем константы для параметров и команд JSON формата в MQTT
-
 // --- имена команд ---
 #define jc_RESET          "reset"                 // команда "мягкой" перезагрузки устройства с закрытием соединений
 #define jc_CLR_CONFIG     "clear_config"          // команда очистки текущей конфигурации в EPROM и перезагрузки устройства
@@ -158,9 +159,9 @@ extern "C" {
 #define jk_TRIGGER_OUT    "trigger_out"           // ключ описания значения выхода триггера
 #define jk_TRIGGER_BYPASS "bypass"                // ключ описания режима проброса триггерного входа
 #define jk_SYNC_BY_OWB    "owb_sync"              // ключ описания режима синхронизации по OneWireBUS
-#define jk_LIGHT_SET      "light_set"             // ключ описания массива значений PWM для ручной подсветки
-#define jk_LIGHT_AUTO     "light_auto"            // ключ описания границ значений PWM для автоматической подсветки
-#define jk_AMBIENT        "ambient"               // ключ описания границ значений ambient сенсора
+#define jk_LIGHT_MANUAL_SET  "light_manual"       // ключ описания массива значений PWM для ручной подсветки
+#define jk_LIGHT_AUTO_SET    "light_auto"         // ключ описания границ значений PWM для автоматической подсветки
+#define jk_AMBIENT_SET       "ambient_sens"       // ключ описания границ значений ambient сенсора
 
 // --- значения ключей и команд ---
 #define jv_ONLINE         "online"                // 
@@ -176,13 +177,12 @@ extern "C" {
 // тип описывающий режим работы подсветки индикатора  
 #define MAX_VU_MODE 5                             // максимальное количество режимов подсветки  
 const char* VU_mode_str[]  = {
-  "off",                                          // автоматический режим подсветки по датчику
+  "off",                                          // подсветка выключена
   "on_low",                                       // минимальный уровень подсветки
   "on_middle",                                    // средний уровень подсветки
   "on_high",                                      // максимальный уровень подсветки
-  "auto"                                          // подсветка выключена
+  "auto"                                          // автоматический режим подсветки по датчику
 };
-
 
 // тип описывающий режим работы WIFI - работа с самим WiFi и MQTT 
 enum WiFi_mode_t : uint8_t {
@@ -218,6 +218,14 @@ struct GlobalParams {
   char            command_topic[80];              // топик получения команд
   char            report_topic[80];               // топик отправки состояния 
   char            lwt_topic[80];                  // топик доступности устройства
+// корректируемы установки используемые для подсветки индикатора
+  uint16_t        _max_auto_pwm,                  // максимальное значение яркости при авто регулировании подсветки
+                  _min_auto_pwm,                  // минимальное значение яркости при авто регулировании подсветки
+                  _min_manual_pwm,                // минимальное значение PWM для ручного регулирования яркости подсветки
+                  _mid_manual_pwm,                // среднее значение PWM для ручного регулирования яркости подсветки
+                  _max_manual_pwm,                // максимальное значение PWM для ручного регулирования яркости подсветки
+                  _max_ambient_value,             // максимальное значение возвращаемое сенсором освещенности
+                  _min_ambient_value;             // минимальное значение возвращаемое сенсором освещенности
 // контрольная сумма блока для EEPROM
   uint16_t        simple_crc16;                   // контрольная сумма блока параметров
 };
@@ -283,8 +291,8 @@ GButton bttn_light(BTTN_UV_LIGHT_PIN, HIGH_PULL, NORM_OPEN);                    
 AsyncMqttClient   mqttClient;                  // MQTT клиент
 
 // создаем объект - JSON документ для приема/передачи данных через MQTT
-StaticJsonDocument<255> InputJSONdoc,          // создаем входящий json документ с буфером в 255 байт 
-                        OutputJSONdoc;         // создаем исходящий json документ с буфером в 255 байт 
+StaticJsonDocument<512> InputJSONdoc,          // создаем входящий json документ с буфером в 512 байт 
+                        OutputJSONdoc;         // создаем исходящий json документ с буфером в 512 байт 
 
 // создаем мьютексы для синхронизации доступа к данным
 SemaphoreHandle_t sem_InputJSONdoc = xSemaphoreCreateBinary();                           // создаем двоичный семафор для доступа к JSON документу 
@@ -331,24 +339,32 @@ static void Halt(const char *msg) {
 void SetConfigByDefault() {
 // ------------------- устанавливаем значения в блоке конфигурации по умолчанию --------------  
       memset((void*)&curConfig,0,sizeof(curConfig));    // обнуляем область памяти и заполняем ее значениями по умолчанию
-      curConfig.inp_selector = INP_XLR;                                              // по умолчанию XLR
-      curConfig.vu_light_mode = MAX_VU_MODE-1;                                       // значение auto     
-      curConfig.enable_triggers = C_DEF_ENABLE_TRIGGER;                              // разрешение работы через тригерры
-      curConfig.sync_trigger_in_out = C_DEF_SYNC_TRIGGER_OUT;                        // синхронизация Trigger_OUT = Trigger_IN
-      curConfig.sync_by_owb = C_DEF_SYNC_BY_ONEWIREBUS;                              // синхронизация модулей через OneWireBUS
-      memcpy(curConfig.wifi_ssid,P_WIFI_SSID,sizeof(P_WIFI_SSID));                   // сохраняем имя WiFi сети по умолчанию      
-      memcpy(curConfig.wifi_pwd,P_WIFI_PASSWORD,sizeof(P_WIFI_PASSWORD));            // сохраняем пароль к WiFi сети по умолчанию
-      memcpy(curConfig.mqtt_usr,P_MQTT_USER,sizeof(P_MQTT_USER));                    // сохраняем имя пользователя MQTT сервера по умолчанию
-      memcpy(curConfig.mqtt_pwd,P_MQTT_PWD,sizeof(P_MQTT_PWD));                      // сохраняем пароль к MQTT серверу по умолчанию
-      curConfig.mqtt_host[0] = P_MQTT_HOST[0];                                       // сохраняем адрес сервера MQTT по умолчанию
+      curConfig.inp_selector = INP_XLR;                                               // по умолчанию XLR
+      curConfig.vu_light_mode = MAX_VU_MODE-1;                                        // значение auto     
+      curConfig.enable_triggers = C_DEF_ENABLE_TRIGGER;                               // разрешение работы через тригерры
+      curConfig.sync_trigger_in_out = C_DEF_SYNC_TRIGGER_OUT;                         // синхронизация Trigger_OUT = Trigger_IN
+      curConfig.sync_by_owb = C_DEF_SYNC_BY_ONEWIREBUS;                               // синхронизация модулей через OneWireBUS
+      memcpy(curConfig.wifi_ssid,P_WIFI_SSID,sizeof(P_WIFI_SSID));                    // сохраняем имя WiFi сети по умолчанию      
+      memcpy(curConfig.wifi_pwd,P_WIFI_PASSWORD,sizeof(P_WIFI_PASSWORD));             // сохраняем пароль к WiFi сети по умолчанию
+      memcpy(curConfig.mqtt_usr,P_MQTT_USER,sizeof(P_MQTT_USER));                     // сохраняем имя пользователя MQTT сервера по умолчанию
+      memcpy(curConfig.mqtt_pwd,P_MQTT_PWD,sizeof(P_MQTT_PWD));                       // сохраняем пароль к MQTT серверу по умолчанию
+      curConfig.mqtt_host[0] = P_MQTT_HOST[0];                                        // сохраняем адрес сервера MQTT по умолчанию
       curConfig.mqtt_host[1] = P_MQTT_HOST[1];
       curConfig.mqtt_host[2] = P_MQTT_HOST[2];
       curConfig.mqtt_host[3] = P_MQTT_HOST[3];
-      memcpy(curConfig.command_topic,P_SET_TOPIC,sizeof(P_SET_TOPIC));               // сохраняем наименование командного топика
-      memcpy(curConfig.report_topic,P_STATE_TOPIC,sizeof(P_STATE_TOPIC));            // сохраняем наименование топика состояния
-      memcpy(curConfig.lwt_topic,P_LWT_TOPIC,sizeof(P_LWT_TOPIC));                   // сохраняем наименование топика доступности
+      memcpy(curConfig.command_topic,P_SET_TOPIC,sizeof(P_SET_TOPIC));                // сохраняем наименование командного топика
+      memcpy(curConfig.report_topic,P_STATE_TOPIC,sizeof(P_STATE_TOPIC));             // сохраняем наименование топика состояния
+      memcpy(curConfig.lwt_topic,P_LWT_TOPIC,sizeof(P_LWT_TOPIC));                    // сохраняем наименование топика доступности
       curConfig.mqtt_port = P_MQTT_PORT;
-      // расчитываем контрольную сумму блока данных
+      // инициализируем значения PWM и границ регулирования
+      curConfig._max_auto_pwm = DEF_MAX_AUTO_PWM;                                     // максимальное значение яркости при авто регулировании подсветки
+      curConfig._min_auto_pwm = DEF_MIN_AUTO_PWM;                                     // минимальное значение яркости при авто регулировании подсветки
+      curConfig._min_manual_pwm = DEF_MIN_MANUAL_PWM;                                 // минимальное значение PWM для ручного регулирования яркости подсветки
+      curConfig._mid_manual_pwm = DEF_MID_MANUAL_PWM;                                 // среднее значение PWM для ручного регулирования яркости подсветки
+      curConfig._max_manual_pwm = DEF_MAX_MANUAL_PWM;                                 // максимальное значение PWM для ручного регулирования яркости подсветки
+      curConfig._max_ambient_value = DEF_MAX_AMBIENT_VALUE;                           // максимальное значение возвращаемое сенсором освещенности
+      curConfig._min_ambient_value = DEF_MIN_AMBIENT_VALUE;                           // минимальное значение возвращаемое сенсором освещенности
+       // расчитываем контрольную сумму блока данных
       curConfig.simple_crc16 = GetCrc16Simple((uint8_t*)&curConfig, sizeof(curConfig)-4);     // считаем CRC16      
 }
 
@@ -359,7 +375,6 @@ bool ReadEEPROMConfig (){
   EEPROM.get(0,curConfig);                                                 // читаем блок конфигурации из EEPROM
   tmp_CRC = GetCrc16Simple((uint8_t*)&curConfig, sizeof(curConfig)-4);     // считаем CRC16
   return (tmp_CRC==curConfig.simple_crc16);                                // возвращаем сошлась ли CRC16 
-
 }
 
 void CheckAndUpdateEEPROM() {
@@ -388,7 +403,6 @@ void CheckAndUpdateEEPROM() {
       EEPROM.commit();
   }    
 #endif      
-
 }
 
 // ========================= вспомогательные задачи времени выполнения ===================================
@@ -593,11 +607,50 @@ void cmdTriggerByPass(const bool _Mode) {
 
 void cmdChangeVULightMode(const char * _Mode) {
 // переключаем режим освещения в нужный режим     
+ for (uint8_t i = 0; i < MAX_VU_MODE; i++) {    // перебираем строки пока не найдем нашу
+   if (strcmp(VU_mode_str[i],_Mode) == 0) {     // если строку нашли
+      curConfig.vu_light_mode = i;              // устанавливаем правильный режим
+      f_HasReportNow = true;                    // отчитываемся об этом
+      f_HasChanges = true;                      // устанавливаем флаг наличия изменений
 
- // TODO: ...
-   
-  f_HasReportNow = true;
+      // TODO: расчитываем новые значения для текущей яркости и применяем их
+
+      break;  
+    } 
+ }
 }
+
+void cmdChangeManualPWMSet(uint16_t _min, uint16_t _mid, uint16_t _max) {
+// функция изменения параметров яркости ручного режима
+  curConfig._min_manual_pwm = _min;
+  curConfig._mid_manual_pwm = _mid;
+  curConfig._max_manual_pwm = _max;
+  f_HasChanges = true; 
+
+  // TODO: расчитываем новые значения для текущей яркости и применяем их
+
+}
+
+void cmdChangeAutoPWMSet(uint16_t _min, uint16_t _max) {
+// функция изменения параметров яркости автоматического режима
+  curConfig._min_auto_pwm = _min;
+  curConfig._max_auto_pwm = _max;
+  f_HasChanges = true; 
+
+  // TODO: расчитываем новые значения для текущей яркости и применяем их
+
+}
+
+void cmdChangeSensorMapSet(uint16_t _min, uint16_t _max) {
+// вызываем функцию изменения параметров мапировки сенсора
+  curConfig._min_ambient_value = _min;
+  curConfig._max_ambient_value = _max;
+  f_HasChanges = true; 
+
+  // TODO: расчитываем новые значения для текущей яркости и применяем их
+
+}
+
 
 void cmdPowerON() {
 // команда включения усилителя
@@ -695,8 +748,66 @@ void eventHandlerTask (void *pvParam) {
       }
       // MQTT: переключение режима освещенности VU индикатора
       if (InputJSONdoc.containsKey(jk_LIGHT_MODE))  {   // послана команда переключения режима освещенности VU индикатора
-        const char* _VU_Mode = InputJSONdoc[jk_TRIGGER_BYPASS];
-        cmdChangeVULightMode(_VU_Mode) ;                              // переключаем режим
+        const char* _VU_Mode = InputJSONdoc[jk_LIGHT_MODE];
+        if(_VU_Mode != nullptr) {                                       // если тип будет другим - будет крэш
+          cmdChangeVULightMode(_VU_Mode) ;                              // переключаем режим
+        }  
+      }
+      // MQTT: задание параметров подсветки VU индикатора в ручном режиме
+      if (InputJSONdoc.containsKey(jk_LIGHT_MANUAL_SET))  {   // послан набор данных для установки параметров ручных режимов подсветки
+        uint16_t _min_manual = DEF_MIN_MANUAL_PWM;
+        if (InputJSONdoc[jk_LIGHT_MANUAL_SET][0].is<int16_t>()) _min_manual = InputJSONdoc[jk_LIGHT_MANUAL_SET][0];
+        uint16_t _mid_manual = DEF_MID_MANUAL_PWM;
+        if (InputJSONdoc[jk_LIGHT_MANUAL_SET][1].is<int16_t>()) _mid_manual = InputJSONdoc[jk_LIGHT_MANUAL_SET][1];
+        uint16_t _max_manual = DEF_MAX_MANUAL_PWM;
+        if (InputJSONdoc[jk_LIGHT_MANUAL_SET][2].is<int16_t>()) _max_manual = InputJSONdoc[jk_LIGHT_MANUAL_SET][2];
+        if ((_min_manual<=_mid_manual) and (_mid_manual<=_max_manual)) {  // простейшая проверка на валидность значений
+          #ifdef DEBUG_LEVEL_PORT                                            
+          Serial.printf("New set for manual light is: min=%u mid=%u max=%u \n",_min_manual,_mid_manual,_max_manual);
+          #endif
+          cmdChangeManualPWMSet(_min_manual,_mid_manual,_max_manual);                        // вызываем функцию изменения параметров яркости ручного режима
+          }
+        else {
+          #ifdef DEBUG_LEVEL_PORT                                            
+          Serial.printf("!!! New result for manual set [%u,%u,%u] - is wrong! \n",_min_manual,_mid_manual,_max_manual);
+          #endif
+        }
+      }
+      // MQTT: задание параметров автоматической подсветки VU индикатора
+      if (InputJSONdoc.containsKey(jk_LIGHT_AUTO_SET))  {   // послан набор данных для установки параметров автоматического режима подсветки
+        uint16_t _min_auto = DEF_MIN_AUTO_PWM;
+        if (InputJSONdoc[jk_LIGHT_AUTO_SET][0].is<int16_t>()) _min_auto = InputJSONdoc[jk_LIGHT_AUTO_SET][0];
+        uint16_t _max_auto = DEF_MAX_AUTO_PWM;
+        if (InputJSONdoc[jk_LIGHT_AUTO_SET][1].is<int16_t>()) _max_auto = InputJSONdoc[jk_LIGHT_AUTO_SET][1];
+        if (_min_auto<=_max_auto) {  // простейшая проверка на валидность значений
+          #ifdef DEBUG_LEVEL_PORT                                            
+          Serial.printf("New set for auto light is: min=%u max=%u \n",_min_auto,_max_auto);
+          #endif
+          cmdChangeAutoPWMSet(_min_auto,_max_auto);                                         // вызываем функцию изменения параметров яркости автоматического режима
+          }
+        else {
+          #ifdef DEBUG_LEVEL_PORT                                            
+          Serial.printf("!!! New result for auto set [%u,%u] - is wrong! \n",_min_auto,_max_auto);
+          #endif
+        }
+      }
+      // MQTT: задание порогов сработки сенсора для автоматической подсветки VU индикатора
+      if (InputJSONdoc.containsKey(jk_AMBIENT_SET))  {   // послан набор данных для установки параметров автоматического режима подсветки
+        uint16_t _min_sens = DEF_MIN_AMBIENT_VALUE;
+        if (InputJSONdoc[jk_AMBIENT_SET][0].is<int16_t>()) _min_sens = InputJSONdoc[jk_AMBIENT_SET][0];
+        uint16_t _max_sens = DEF_MAX_AMBIENT_VALUE;
+        if (InputJSONdoc[jk_AMBIENT_SET][1].is<int16_t>()) _max_sens = InputJSONdoc[jk_AMBIENT_SET][1];
+        if (_min_sens<_max_sens) {  // простейшая проверка на валидность значений
+          #ifdef DEBUG_LEVEL_PORT                                            
+          Serial.printf("New map for ambient sensor is: min=%u max=%u \n",_min_sens,_max_sens);
+          #endif
+          cmdChangeSensorMapSet(_min_sens,_max_sens);                                         // вызываем функцию изменения параметров мапировки сенсора
+          }
+        else {
+          #ifdef DEBUG_LEVEL_PORT                                            
+          Serial.printf("!!! New result for sensor's map [%u,%u] - is wrong! \n",_min_sens,_max_sens);
+          #endif
+        }
       }
       f_HasMQTTCommand = false;                                       // сбрасываем флаг наличия изменений через MQTT 
       InputJSONdoc.clear();                                           // очищаем входной документ
@@ -866,6 +977,16 @@ void reportTask (void *pvParam) {
         OutputJSONdoc[jk_TRIGGER_OUT] = digitalRead(TRIGGER_OUT_PIN) ? jv_ON : jv_OFF;              // состояние триггерного выхода 
         OutputJSONdoc[jk_TRIGGER_BYPASS] = curConfig.sync_trigger_in_out ? jv_ON : jv_OFF;          // проброс триггерного входа на выход
         OutputJSONdoc[jk_SYNC_BY_OWB] = curConfig.sync_by_owb ? jv_ON : jv_OFF;                     // синхронизация по OneWireBUS
+        // добавляем массив значений ручной подсветки
+        OutputJSONdoc[jk_LIGHT_MANUAL_SET][0] = curConfig._min_manual_pwm;                     
+        OutputJSONdoc[jk_LIGHT_MANUAL_SET][1] = curConfig._mid_manual_pwm;                     
+        OutputJSONdoc[jk_LIGHT_MANUAL_SET][2] = curConfig._max_manual_pwm;                    
+        // добавляем границы автоматической подсветки
+        OutputJSONdoc[jk_LIGHT_AUTO_SET][0] = curConfig._min_auto_pwm;                     
+        OutputJSONdoc[jk_LIGHT_AUTO_SET][1] = curConfig._max_auto_pwm;                     
+        // добавляем границы работы сенсора освещения
+        OutputJSONdoc[jk_AMBIENT_SET][0] = curConfig._min_ambient_value;                     
+        OutputJSONdoc[jk_AMBIENT_SET][1] = curConfig._max_ambient_value;                     
         // серилизуем в строку
         String tmpPayload;
         serializeJson(OutputJSONdoc, tmpPayload);
