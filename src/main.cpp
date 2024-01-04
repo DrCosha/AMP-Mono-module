@@ -43,7 +43,10 @@ MQTT соединения нет, то периодически пытаемся
   {"trigger_enable":"on"|"off"}             - разрешить/запретить работу триггеров
   {"owb_sync":"on"|"off"}                   - разрешение синхронизации по OneWireBUS
   {"bypass":"on"|"off"}                     - разрешение прямой проброски триггерного сигнала с входа на выход
-  {"vu_light": "auto"|"on_low"|"on_middle"|"on_high"|"off"}  - режим работы подсветки VU индикатора    
+  {"vu_light": "auto"|"on_low"|"on_middle"|"on_high"|"off"}  - режим работы подсветки VU индикатора 
+  {"light_set": [<value1>,<value2>,<value3>]}                - значения PWM для подстройки яркости освещения в режимах "on_low","on_middle","on_high"
+  {"light_auto": [<min_value>,<max_value>]}                  - значения PWM для подстройки границ изменения автоматической яркости
+  {"ambient": [<min_value>,<max_value>]}                     - подстройка границ входного сигнала сенсора освещенности
 
 */
 
@@ -64,84 +67,85 @@ extern "C" {
 #include <ArduinoJson.h>
 
 // устанавливаем режим отладки
-#define DEBUG_LEVEL_PORT                        // устанавливаем режим отладки через порт
+#define DEBUG_LEVEL_PORT                          // устанавливаем режим отладки через порт
 
 // установка скорости передачи данных по шине OneWireBus
-#define OneWireCycle OWB_DEFAULT_SPEED          // базовый цикл шины - скорость по умолчанию
+#define OneWireCycle OWB_DEFAULT_SPEED            // базовый цикл шины - скорость по умолчанию
 
 // определение пинов подключения переферии
-#define BTTN_POWER_PIN 26                       // пин подключения кнопки POWER 
-#define BTTN_SELECTOR_PIN 4                     // пин подключения кнопки SELECTOR
-#define BTTN_UV_LIGHT_PIN 33                    // пин подключения кнопки UV_LIGHT 
+#define BTTN_POWER_PIN 26                         // пин подключения кнопки POWER 
+#define BTTN_SELECTOR_PIN 4                       // пин подключения кнопки SELECTOR
+#define BTTN_UV_LIGHT_PIN 33                      // пин подключения кнопки UV_LIGHT 
 
-#define LED_POWER_GREEN_PIN 14                  // пин LED power GREEN 
-#define LED_POWER_RED_PIN 2                     // пин LED power RED 
-#define LED_POWER_BLUE_PIN 15                   // пин LED power BLUE
+#define LED_POWER_GREEN_PIN 14                    // пин LED power GREEN 
+#define LED_POWER_RED_PIN 2                       // пин LED power RED 
+#define LED_POWER_BLUE_PIN 15                     // пин LED power BLUE
 
-#define LED_SELECTOR_RCA_PIN 17                 // пин LED для индикации RCA
-#define LED_SELECTOR_XLR_PIN 13                 // пин LED для индикации XLR
+#define LED_SELECTOR_RCA_PIN 17                   // пин LED для индикации RCA
+#define LED_SELECTOR_XLR_PIN 13                   // пин LED для индикации XLR
 
-#define RELAY_POWER_PIN 22                      // пин управления реле POWER
-#define RELAY_SELECTOR_PIN 23                   // пин управления реле SELECTOR
+#define RELAY_POWER_PIN 22                        // пин управления реле POWER
+#define RELAY_SELECTOR_PIN 23                     // пин управления реле SELECTOR
 
-#define MUTE_VU_PIN 25                          // пин управления выключением VU индикатора
+#define MUTE_VU_PIN 25                            // пин управления выключением VU индикатора
 
-#define TRIGGER_IN_PIN 21                       // пин подключения входа TRIGGER IN
-#define TRIGGER_OUT_PIN 18                      // пин управления выходом TRIGGER OUT
+#define TRIGGER_IN_PIN 21                         // пин подключения входа TRIGGER IN
+#define TRIGGER_OUT_PIN 18                        // пин управления выходом TRIGGER OUT
 
-#define ONE_WIRE_PIN 32                         // пин шины 1Wire
+#define ONE_WIRE_PIN 32                           // пин шины 1Wire
 
-#define AMBIENT_SENSOR_PIN 36                   // пин подключения датчика освещенности
+#define AMBIENT_SENSOR_PIN 36                     // пин подключения датчика освещенности
 
-#define LED_UV_LIGHT_PIN 12                     // пин подключения PWM управления для UV подсветки
+#define LED_UV_LIGHT_PIN 12                       // пин подключения PWM управления для UV подсветки
 
 // определяем константы для задержек
-#define C_VU_DELAY 5000                         // задержка включения стрелочек после подачи питания (5 сек)
-#define C_AMBIENT_CHECK_DELAY 5000              // через сколько миллисекунд проверять датчик внешней освещенности (5 сек)
-#define C_BRIGHTNESS_SET_DELAY 100              // задержка для плавного изменения яркости от текущей до заданной (0,1 сек)
-#define C_WIFI_CONNECT_TIMEOUT 30000            // задержка для установления WiFi соединения (30 сек)
-#define C_MQTT_CONNECT_TIMEOUT 10000            // задержка для установления MQTT соединения (10 сек)
-#define C_WIFI_AP_WAIT 180000                   // таймуат поднятой AP без соединения с клиентами (после этого опять пытаемся подключится как клиент) (180 сек)
-#define C_WIFI_CYCLE_WAIT 10000                 // таймуат цикла переустановки соединения с WiFi (10 сек)
-#define C_BLINKER_DELAY 800                     // задержка переключения блинкера
-#define C_TRIGGER_ON_DEBOUNCE 200               // задержка устранения дребезга сигнала TriggerIn при включении - нужна для подавления переходных процессов включения стойки аппаратуры
-#define C_TRIGGER_OFF_DEBOUNCE 1000             // задержка устранения дребезга сигнала TriggerIn при выключении - нужна для подавления переходных процессов включения стойки аппаратуры
+#define C_VU_DELAY_ON 3000                        // подача сигнала отключения стрелок после подачи питания (3 сек)
+#define C_VU_DELAY_OFF 5000                       // подача сигнала отключения стрелок после выключения питания (5 сек)
+#define C_AMBIENT_CHECK_DELAY 5000                // через сколько миллисекунд проверять датчик внешней освещенности (5 сек)
+#define C_BRIGHTNESS_SET_DELAY 100                // задержка для плавного изменения яркости от текущей до заданной (0,1 сек)
+#define C_WIFI_CONNECT_TIMEOUT 30000              // задержка для установления WiFi соединения (30 сек)
+#define C_MQTT_CONNECT_TIMEOUT 10000              // задержка для установления MQTT соединения (10 сек)
+#define C_WIFI_AP_WAIT 180000                     // таймуат поднятой AP без соединения с клиентами (после этого опять пытаемся подключится как клиент) (180 сек)
+#define C_WIFI_CYCLE_WAIT 10000                   // таймуат цикла переустановки соединения с WiFi (10 сек)
+#define C_BLINKER_DELAY 800                       // задержка переключения блинкера
+#define C_TRIGGER_ON_DEBOUNCE 200                 // задержка устранения дребезга сигнала TriggerIn при включении - нужна для подавления переходных процессов включения стойки аппаратуры
+#define C_TRIGGER_OFF_DEBOUNCE 1000               // задержка устранения дребезга сигнала TriggerIn при выключении - нужна для подавления переходных процессов включения стойки аппаратуры
 
 // задержки в формировании MQTT отчета
 
-#define C_MQTT_REPORT_DELAY_ON    30000         // 30 секунд для включенного блока
-#define C_MQTT_REPORT_DELAY_OFF  1800000        // 30 минут для выключенного 
+#define C_MQTT_REPORT_DELAY_ON    30000           // 30 секунд для включенного блока
+#define C_MQTT_REPORT_DELAY_OFF  1800000          // 30 минут для выключенного 
 
 // определяем константы для уровней сигнала
-#define C_MAX_PWM_VALUE 1000                    // максимальное значение яркости при регулировании подсветки
-#define C_MIN_PWM_VALUE 60                      // минимальное значение яркости при регулировании подсветки
-#define C_MAX_SENSOR_VALUE 4000                 // максимальное значение возвращаемое сенсором освещенности
-#define C_MIN_SENSOR_VALUE 0                    // минимальное значение возвращаемое сенсором освещенности
+#define C_MAX_PWM_VALUE 1000                      // максимальное значение яркости при регулировании подсветки
+#define C_MIN_PWM_VALUE 60                        // минимальное значение яркости при регулировании подсветки
+#define C_MAX_SENSOR_VALUE 4000                   // максимальное значение возвращаемое сенсором освещенности
+#define C_MIN_SENSOR_VALUE 0                      // минимальное значение возвращаемое сенсором освещенности
 
-#define INP_XLR true                            // константа выбор входа XLR (1)
-#define INP_RCA false                           // константа выбор входа RCA (0)
+#define INP_XLR true                              // константа выбор входа XLR (1)
+#define INP_RCA false                             // константа выбор входа RCA (0)
 
 // начальные параметры устройства для подключения к WiFi и MQTT
 
-#define P_WIFI_SSID "iot_ls"                            // SSID нашей локальной сети  
-#define P_WIFI_PASSWORD "vvssoft40"                     // пароль к нашей локальной сети
-#define P_MQTT_USER "mqtt_user"                         // имя пользователя для подключения к MQTT серверу
-#define P_MQTT_PWD "vvssoft40"                          // пароль для подключения к MQTT серверу
-#define P_MQTT_HOST IPAddress(192, 168, 10, 100)        // адрес нашего Mosquito MQTT сервера
-#define P_MQTT_PORT 1883                                // порт нашего Mosquito MQTT сервера
+#define P_WIFI_SSID "iot_ls"                      // SSID нашей локальной сети  
+#define P_WIFI_PASSWORD "vvssoft40"               // пароль к нашей локальной сети
+#define P_MQTT_USER "mqtt_user"                   // имя пользователя для подключения к MQTT серверу
+#define P_MQTT_PWD "vvssoft40"                    // пароль для подключения к MQTT серверу
+#define P_MQTT_HOST IPAddress(192, 168, 10, 100)  // адрес нашего Mosquito MQTT сервера
+#define P_MQTT_PORT 1883                          // порт нашего Mosquito MQTT сервера
 
-#define P_LWT_TOPIC   "diy/hires_amp_01/LWT"            // топик публикации доступности устройства
-#define P_SET_TOPIC   "diy/hires_amp_01/set"            // топик публикации команд для устройства
-#define P_STATE_TOPIC "diy/hires_amp_01/state"          // топик публикации состояния устройства
+#define P_LWT_TOPIC   "diy/hires_amp_01/LWT"      // топик публикации доступности устройства
+#define P_SET_TOPIC   "diy/hires_amp_01/set"      // топик публикации команд для устройства
+#define P_STATE_TOPIC "diy/hires_amp_01/state"    // топик публикации состояния устройства
 
-#define C_MAX_FAILED_TRYS 3                     // количество попыток повтора для поднятия AP точки    
+#define C_MAX_FAILED_TRYS 3                       // количество попыток повтора для поднятия AP точки    
 
 // определяем константы для параметров и команд JSON формата в MQTT
 
 // --- имена команд ---
-#define jc_RESET      "reset"                   // команда "мягкой" перезагрузки устройства с закрытием соединений
-#define jc_CLR_CONFIG "clear_config"            // команда очистки текущей конфигурации в EPROM и перезагрузки устройства
-#define jc_REPORT     "report"                  // команда принудительного формирования отчета в топик
+#define jc_RESET          "reset"                 // команда "мягкой" перезагрузки устройства с закрытием соединений
+#define jc_CLR_CONFIG     "clear_config"          // команда очистки текущей конфигурации в EPROM и перезагрузки устройства
+#define jc_REPORT         "report"                // команда принудительного формирования отчета в топик
 
 // --- имена ключей ---
 #define jk_POWER          "power"                 // ключ описания состояния общего включения
@@ -154,7 +158,9 @@ extern "C" {
 #define jk_TRIGGER_OUT    "trigger_out"           // ключ описания значения выхода триггера
 #define jk_TRIGGER_BYPASS "bypass"                // ключ описания режима проброса триггерного входа
 #define jk_SYNC_BY_OWB    "owb_sync"              // ключ описания режима синхронизации по OneWireBUS
-
+#define jk_LIGHT_SET      "light_set"             // ключ описания массива значений PWM для ручной подсветки
+#define jk_LIGHT_AUTO     "light_auto"            // ключ описания границ значений PWM для автоматической подсветки
+#define jk_AMBIENT        "ambient"               // ключ описания границ значений ambient сенсора
 
 // --- значения ключей и команд ---
 #define jv_ONLINE         "online"                // 
@@ -170,61 +176,61 @@ extern "C" {
 // тип описывающий режим работы подсветки индикатора  
 #define MAX_VU_MODE 5                             // максимальное количество режимов подсветки  
 const char* VU_mode_str[]  = {
-  "auto",           // автоматический режим подсветки по датчику
-  "on_low",         // минимальный уровень подсветки
-  "on_middle",      // средний уровень подсветки
-  "on_high",        // максимальный уровень подсветки
-  "off"             // подсветка выключена
+  "off",                                          // автоматический режим подсветки по датчику
+  "on_low",                                       // минимальный уровень подсветки
+  "on_middle",                                    // средний уровень подсветки
+  "on_high",                                      // максимальный уровень подсветки
+  "auto"                                          // подсветка выключена
 };
 
 
 // тип описывающий режим работы WIFI - работа с самим WiFi и MQTT 
 enum WiFi_mode_t : uint8_t {
-  WF_UNKNOWN,       // режим работы WiFi еще не определен
-  WF_OFF,           // при пакете ошибок при работе с WIFI - выключение WIFI и выключение режима ESP.NOW  
-  WF_AP,            // поднятие собственной точки доступа со страничкой настройки   
-  WF_CLIENT,        // включение WIFI в режиме клиента 
-  WF_MQTT,          // соединение с MQTT сервером
-  WF_IN_WORK        // все хорошо, работаем
+  WF_UNKNOWN,                                     // режим работы WiFi еще не определен
+  WF_OFF,                                         // при пакете ошибок при работе с WIFI - выключение WIFI и выключение режима ESP.NOW  
+  WF_AP,                                          // поднятие собственной точки доступа со страничкой настройки   
+  WF_CLIENT,                                      // включение WIFI в режиме клиента 
+  WF_MQTT,                                        // соединение с MQTT сервером
+  WF_IN_WORK                                      // все хорошо, работаем
 };  
 
 // значения базовых параметров по умолчанию
-#define C_DEF_ENABLE_TRIGGER true               // по умолчанию, через работа с триггерами разрешена
-#define C_DEF_SYNC_TRIGGER_OUT true             // синхронизация входного и выходного триггера включена
-#define C_DEF_SYNC_BY_ONEWIREBUS true           // синхронизация модулей через OneWireBUS
+#define C_DEF_ENABLE_TRIGGER true                 // по умолчанию, через работа с триггерами разрешена
+#define C_DEF_SYNC_TRIGGER_OUT true               // синхронизация входного и выходного триггера включена
+#define C_DEF_SYNC_BY_ONEWIREBUS true             // синхронизация модулей через OneWireBUS
 
 // структура данных хранимых в EEPROM
 struct GlobalParams {
 // параметры режима работы усилителя
-  bool            inp_selector;                 // выбранный режим входа ( INP_RCA / INP_XLR )
-  uint8_t         vu_light_mode;                // режим работы подсветки индикатора  
-  bool            sync_trigger_in_out;          // режим прямой проброски триггерного входа на выход
-  bool            enable_triggers;              // разрешено управление через триггера
-  bool            sync_by_owb;                  // синхронизация по OneWireBus
+  bool            inp_selector;                   // выбранный режим входа ( INP_RCA / INP_XLR )
+  uint8_t         vu_light_mode;                  // режим работы подсветки индикатора  
+  bool            sync_trigger_in_out;            // режим прямой проброски триггерного входа на выход
+  bool            enable_triggers;                // разрешено управление через триггера
+  bool            sync_by_owb;                    // синхронизация по OneWireBus
 // параметры подключения к MQTT и WiFi  
-  char            wifi_ssid[20];                // строка SSID сети WiFi
-  char            wifi_pwd[20];                 // пароль к WiFi сети
-  char            mqtt_usr[20];                 // имя пользователя MQTT сервера
-  char            mqtt_pwd[20];                 // пароль к MQTT серверу
-  uint8_t         mqtt_host[4];                 // адрес сервера MQTT
-  uint16_t        mqtt_port;                    // порт подключения к MQTT серверу
+  char            wifi_ssid[20];                  // строка SSID сети WiFi
+  char            wifi_pwd[20];                   // пароль к WiFi сети
+  char            mqtt_usr[20];                   // имя пользователя MQTT сервера
+  char            mqtt_pwd[20];                   // пароль к MQTT серверу
+  uint8_t         mqtt_host[4];                   // адрес сервера MQTT
+  uint16_t        mqtt_port;                      // порт подключения к MQTT серверу
 // параметры очередей MQTT
-  char            command_topic[80];            // топик получения команд
-  char            report_topic[80];             // топик отправки состояния 
-  char            lwt_topic[80];                // топик доступности устройства
+  char            command_topic[80];              // топик получения команд
+  char            report_topic[80];               // топик отправки состояния 
+  char            lwt_topic[80];                  // топик доступности устройства
 // контрольная сумма блока для EEPROM
-  uint16_t        simple_crc16;                 // контрольная сумма блока параметров
+  uint16_t        simple_crc16;                   // контрольная сумма блока параметров
 };
 
 // структура данных передаваемых по OneWireBUS
 struct SyncBUSParams {
 // параметры режима работы усилителя
-  bool            power_on;                     // усилитель включен
-  bool            inp_selector;                 // выбранный режим входа ( RCA-false / XLR-true )
-  uint8_t         vu_light_mode;                // режим работы подсветки индикатора - определяется типом VU_mode_t
-  uint16_t        vu_light_value;               // значение яркости подсветки в виде числа
+  bool            power_on;                       // усилитель включен
+  bool            inp_selector;                   // выбранный режим входа ( RCA-false / XLR-true )
+  uint8_t         vu_light_mode;                  // режим работы подсветки индикатора - определяется типом VU_mode_t
+  uint16_t        vu_light_value;                 // значение яркости подсветки в виде числа
 // контрольная сумма блока данных               
-  uint16_t        simple_crc16;                 // контрольная сумма блока параметров
+  uint16_t        simple_crc16;                   // контрольная сумма блока параметров
 };
 
 // глобальные константы
@@ -237,12 +243,12 @@ const int def_WiFi_Channel = 13;                // канал WiFi по умол
 bool s_AmpPowerOn = false;                      // режим включения усилителя
 bool s_PowerOnByTriggerIn = false;              // режим включения через триггерный вход
 bool s_EnableEEPROM = false;                    // глобальная переменная разрешения работы с EEPROM
-bool s_VU_Enable = false;                       // разрешение работы стрелочного указателя
+bool s_VU_Enable = true;                        // разрешение работы стрелочного указателя
 WiFi_mode_t s_CurrentWIFIMode = WF_UNKNOWN;     // текущий режим работы WiFI
 uint8_t count_GetWiFiConfig = 0;                // счётчик повторов попыток соединения
 
 // временные моменты наступления контрольных событий в миллисекундах 
-uint32_t tm_PowerOn = 0;                        // когда включено питание
+uint32_t tm_TogglePower = 0;                    // когда переключено питание
 uint32_t tm_LastAmbientCheck = 0;               // последний момент проверки внешнего освещения
 uint32_t tm_LastBrightnessSet = 0;              // последний момент установки яркости индикатора
 uint32_t tm_LastReportToMQTT = 0;               // время последнего отчета в MQTT
@@ -326,7 +332,7 @@ void SetConfigByDefault() {
 // ------------------- устанавливаем значения в блоке конфигурации по умолчанию --------------  
       memset((void*)&curConfig,0,sizeof(curConfig));    // обнуляем область памяти и заполняем ее значениями по умолчанию
       curConfig.inp_selector = INP_XLR;                                              // по умолчанию XLR
-      curConfig.vu_light_mode = 0;                                                   // значение auto     
+      curConfig.vu_light_mode = MAX_VU_MODE-1;                                       // значение auto     
       curConfig.enable_triggers = C_DEF_ENABLE_TRIGGER;                              // разрешение работы через тригерры
       curConfig.sync_trigger_in_out = C_DEF_SYNC_TRIGGER_OUT;                        // синхронизация Trigger_OUT = Trigger_IN
       curConfig.sync_by_owb = C_DEF_SYNC_BY_ONEWIREBUS;                              // синхронизация модулей через OneWireBUS
@@ -586,7 +592,7 @@ void cmdTriggerByPass(const bool _Mode) {
 }
 
 void cmdChangeVULightMode(const char * _Mode) {
-// по кругу переключаем режим освещения       
+// переключаем режим освещения в нужный режим     
 
  // TODO: ...
    
@@ -597,15 +603,15 @@ void cmdPowerON() {
 // команда включения усилителя
   #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
   Serial.printf("Switch power from %s to ON\n",s_AmpPowerOn ? jv_ON : jv_OFF);
-  #endif        
-  s_AmpPowerOn = true;                                 // отмечаем текущее состояние  
-  digitalWrite(RELAY_POWER_PIN, HIGH);                 // включаем основной силовой блок питания
-  tm_PowerOn = millis();                               // запоминаем момент включения основного питания 
-
-  // TODO:  нужно включить/выключить стрнелочки если нужно
-
-  f_HasChanges = true;
-  f_HasReportNow = true;
+  #endif  
+  if (!s_AmpPowerOn) { // если усилитель еще не включен 
+    s_AmpPowerOn = true;                                 // отмечаем текущее состояние  
+    digitalWrite(RELAY_POWER_PIN, HIGH);                 // включаем основной силовой блок питания
+    tm_TogglePower = millis();                           // запоминаем момент включения основного питания 
+    s_VU_Enable = false;                                 // запрещаем работу стрелочного указателя на период переходных процессов    
+    f_HasChanges = true;
+    f_HasReportNow = true;
+  }
 }
 
 void cmdPowerOFF() {
@@ -613,14 +619,15 @@ void cmdPowerOFF() {
   #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
   Serial.printf("Switch power from %s to OFF\n",s_AmpPowerOn ? jv_ON : jv_OFF);
   #endif    
-  CheckAndUpdateEEPROM();                               // запоминаем текущую конфигурацию  
-
-  // TODO:  нужно включить/выключить стрнелочки если нужно
-
-  digitalWrite(RELAY_POWER_PIN, LOW);                   // выключаем основной силовой блок питания  
-  s_AmpPowerOn = false;
-  f_HasChanges = true;  
-  f_HasReportNow = true;  
+  if (s_AmpPowerOn) { // если усилитель еще не выключен 
+    CheckAndUpdateEEPROM();                              // запоминаем текущую конфигурацию  
+    digitalWrite(RELAY_POWER_PIN, LOW);                  // выключаем основной силовой блок питания  
+    tm_TogglePower = millis();                           // запоминаем момент выключения основного питания 
+    s_VU_Enable = false;                                 // запрещаем работу стрелочного указателя на период переходных процессов    
+    s_AmpPowerOn = false;
+    f_HasChanges = true;  
+    f_HasReportNow = true;  
+  }
 }
 
 // ================================== основные задачи времени выполнения =================================
@@ -635,6 +642,17 @@ void eventHandlerTask (void *pvParam) {
       f_Blinker = !f_Blinker;
       tm_LastBlinkFire = millis();
     } 
+    // обработка задержки включения стрелок после смены режима включения/выключения усилителя
+    if (!s_VU_Enable)  { // обрабатываем задержку только если стрелочки выключены
+      if (s_AmpPowerOn) s_VU_Enable = ((millis()-tm_TogglePower) > C_VU_DELAY_ON) and (curConfig.vu_light_mode != 0);      // строка для включения усилителя
+        else s_VU_Enable = ((millis()-tm_TogglePower) > C_VU_DELAY_OFF) and (curConfig.vu_light_mode != 0);      // строка для выключения усилителя
+      if (s_VU_Enable) {        
+        #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+        Serial.println("VU индикатор включен...");
+        #endif  
+        f_HasChanges = true;
+      }
+    }      
     //-------------------- обработка событий получения MQTT команд в приложение ----------------------
     if ( f_HasMQTTCommand ) {                                         // превращаем события MQTT в команды для отработки приложением    
       // защищаем секцию работы с Static JSON DOC с помощью мьютекса
@@ -680,13 +698,6 @@ void eventHandlerTask (void *pvParam) {
         const char* _VU_Mode = InputJSONdoc[jk_TRIGGER_BYPASS];
         cmdChangeVULightMode(_VU_Mode) ;                              // переключаем режим
       }
-
-
-
-      // TODO: прочие команды из MQTT
-
-
-
       f_HasMQTTCommand = false;                                       // сбрасываем флаг наличия изменений через MQTT 
       InputJSONdoc.clear();                                           // очищаем входной документ
       xSemaphoreGive(sem_InputJSONdoc);                               // отпускаем семафор обработки входного сообщения
@@ -751,6 +762,10 @@ void eventHandlerTask (void *pvParam) {
         f_TriggerIn = tmp_TriggerIn;                              // назначаем текущее состояние основной переменной
       }  
     }
+    //----------------------------- получение команды по OneWireBUS ----------------------------------
+
+    // TODO: Обрабатываем команды OneWireBUS
+    
     // отдаем управление ядру FreeRT OS
     vTaskDelay(1/portTICK_PERIOD_MS); 
   }
@@ -806,10 +821,13 @@ void applayChangesTask (void *pvParam) {
         }
       else digitalWrite(TRIGGER_OUT_PIN, s_AmpPowerOn);  // иначе выход Trigger_OUT поднимаем, когда включен усилитель и разрешен Trigger_OUT
       }  
-    else digitalWrite(TRIGGER_OUT_PIN, LOW);  // если внешний триггер запрещен - держим его выключенным
+    else digitalWrite(TRIGGER_OUT_PIN, LOW);  // если внешний триггер запрещен - держим его выключенным    
     // ----- ниже исполняется только то, что отмечено флагом изменений f_HasChanges ----
     if (f_HasChanges) {
-      
+      // включаем/выключаем стрелочки 
+      if (s_VU_Enable) digitalWrite(MUTE_VU_PIN, LOW); // включаем стрелочки MUTE_VU_PIN = 0
+        else digitalWrite(MUTE_VU_PIN, HIGH); // выключаем стрелочки MUTE_VU_PIN = 1
+
       // TODO: применяем изменения отмеченные флагом
 
       f_HasChanges = false;
