@@ -44,7 +44,7 @@ MQTT соединения нет, то периодически пытаемся
   {"owb_sync":"on"|"off"}                   - разрешение синхронизации по OneWireBUS
   {"bypass":"on"|"off"}                     - разрешение прямой проброски триггерного сигнала с входа на выход
   {"vu_light": "off"|"on_low"|"on_middle"|"on_high"|"auto"}  - режим работы подсветки VU индикатора 
-  {"light_set": [<value1>,<value2>,<value3>]}                - значения PWM для подстройки яркости освещения в режимах "on_low","on_middle","on_high"
+  {"light_manual": [<value1>,<value2>,<value3>]}             - значения PWM для подстройки яркости освещения в режимах "on_low","on_middle","on_high"
   {"light_auto": [<min_value>,<max_value>]}                  - значения PWM для подстройки границ изменения автоматической яркости
   {"ambient": [<min_value>,<max_value>]}                     - подстройка границ входного сигнала сенсора освещенности
 
@@ -58,6 +58,7 @@ extern "C" {
 #include "freertos/FreeRTOS.h"
 #include "freertos/timers.h"
 #include "freertos/semphr.h"
+#include "esp_mac.h"
 }
 
 #include "GyverButton.h"
@@ -70,7 +71,7 @@ extern "C" {
 #define DEBUG_LEVEL_PORT                          // устанавливаем режим отладки через порт
 
 // установка скорости передачи данных по шине OneWireBus
-#define OneWireCycle OWB_DEFAULT_SPEED            // базовый цикл шины - скорость по умолчанию
+#define OneWireCycle 640                          // базовый цикл шины - скорость по умолчанию
 
 // определение пинов подключения переферии
 #define BTTN_POWER_PIN 26                         // пин подключения кнопки POWER 
@@ -110,16 +111,19 @@ extern "C" {
 #define C_BLINKER_DELAY 800                       // задержка переключения блинкера
 #define C_TRIGGER_ON_DEBOUNCE 200                 // задержка устранения дребезга сигнала TriggerIn при включении - нужна для подавления переходных процессов включения стойки аппаратуры
 #define C_TRIGGER_OFF_DEBOUNCE 1000               // задержка устранения дребезга сигнала TriggerIn при выключении - нужна для подавления переходных процессов включения стойки аппаратуры
+#define C_OWB_TRY_DELAY 100                       // задержка при ошибке отправки пакета по OneWireBUS
+#define C_OWB_READ_BUS_DELAY 50                   // задержка при чтении пакетов по OneWireBUS
+#define C_MAX_LOST_ON_OWB 1000                    // максимальное количество пакетов подряд после которых выключается попытка синхронизации устройств 
 
 // задержки в формировании MQTT отчета
 #define C_MQTT_REPORT_DELAY_ON    30000           // 30 секунд для включенного блока
 #define C_MQTT_REPORT_DELAY_OFF  1800000          // 30 минут для выключенного 
 
 // определяем константы для уровней сигнала
-#define DEF_MAX_AUTO_PWM 1000                     // максимальное значение яркости при авто регулировании подсветки
+#define DEF_MAX_AUTO_PWM 2000                     // максимальное значение яркости при авто регулировании подсветки
 #define DEF_MIN_AUTO_PWM 60                       // минимальное значение яркости при авто регулировании подсветки
-#define DEF_MIN_MANUAL_PWM 60                     // минимальное значение PWM для ручного регулирования яркости подсветки
-#define DEF_MID_MANUAL_PWM 120                    // среднее значение PWM для ручного регулирования яркости подсветки
+#define DEF_MIN_MANUAL_PWM 70                     // минимальное значение PWM для ручного регулирования яркости подсветки
+#define DEF_MID_MANUAL_PWM 100                    // среднее значение PWM для ручного регулирования яркости подсветки
 #define DEF_MAX_MANUAL_PWM 1000                   // максимальное значение PWM для ручного регулирования яркости подсветки
 #define DEF_MAX_AMBIENT_VALUE 4000                // максимальное значение возвращаемое сенсором освещенности
 #define DEF_MIN_AMBIENT_VALUE 0                   // минимальное значение возвращаемое сенсором освещенности
@@ -236,7 +240,7 @@ struct SyncBUSParams {
   bool            power_on;                       // усилитель включен
   bool            inp_selector;                   // выбранный режим входа ( RCA-false / XLR-true )
   uint8_t         vu_light_mode;                  // режим работы подсветки индикатора - определяется типом VU_mode_t
-  uint16_t        vu_light_value;                 // значение яркости подсветки в виде числа
+//  uint16_t        vu_light_value;                 // значение яркости подсветки в виде числа
 // контрольная сумма блока данных               
   uint16_t        simple_crc16;                   // контрольная сумма блока параметров
 };
@@ -272,15 +276,18 @@ bool f_HasReportNow = false;                    // флаг формирован
 bool f_Blinker = false;                         // флаг "мигания" - переключается с задержкой C_BLINKER_DELAY
 bool f_TriggerDebounce = false;                 // флаг нахождения в режиме устранения дребезга по триггерному входу
 bool f_TriggerIn = false;                       // флаг триггерного входа
+bool f_HasDataForSync = false;                  // флаг наличия данных для отправки через OneWireBUS 
+bool f_HasOWBPacket = false;                    // флаг наличия пакета с командами полученными по OneWireBUS 
 
 // переменные управления яркостью индикатора
 uint16_t  v_CurrAmbient = 0;                    // усредненная величина текущей яркости окружающенго освещения
 uint16_t  v_GoalBrightness = 0;                 // величина рассчитанной яркости подсветки VU индикатора по текущей освещенности
 uint16_t  v_CurrBrightness = 0;                 // величина текущей установленной яркости подсветки VU индикатора
+uint8_t   v_OWBErrorCount = 0;                  // количество не удачных попыток передачи через OneWireBUS подряд
 
 // создаем буфера и структуры данных
-GlobalParams  curConfig;                        // набор параметров управляющих текущей конфигурацией
-SyncBUSParams  OutBuffer, InBuffer;             // буфер передаваемых и принимаемых параметров
+GlobalParams   curConfig;                       // набор параметров управляющих текущей конфигурацией
+SyncBUSParams  OutOWBBuffer, InOWBBuffer;       // буфер передаваемых и принимаемых параметров
 
 // создаем и инициализируем объекты - кнопки
 GButton bttn_power(BTTN_POWER_PIN, HIGH_PULL, NORM_OPEN);                                 // инициализируем кнопку управления питанием
@@ -296,6 +303,7 @@ StaticJsonDocument<512> InputJSONdoc,          // создаем входящи�
 
 // создаем мьютексы для синхронизации доступа к данным
 SemaphoreHandle_t sem_InputJSONdoc = xSemaphoreCreateBinary();                           // создаем двоичный семафор для доступа к JSON документу 
+SemaphoreHandle_t sem_InputOWBPacket = xSemaphoreCreateBinary();                         // создаем двоичный семафор для доступа к входному пакету принятому по OneWireBUS
 
 // =============================== общие процедуры и функции ==================================
 
@@ -366,6 +374,47 @@ void SetConfigByDefault() {
       curConfig._min_ambient_value = DEF_MIN_AMBIENT_VALUE;                           // минимальное значение возвращаемое сенсором освещенности
        // расчитываем контрольную сумму блока данных
       curConfig.simple_crc16 = GetCrc16Simple((uint8_t*)&curConfig, sizeof(curConfig)-4);     // считаем CRC16      
+}
+
+int CalcBrightnessByAmbient(int _Ambient) {  
+// ------------------ рассчитываем уровень яркости подсветки по внешнему датчику ----------------
+int ret_PWM = curConfig._min_auto_pwm;
+  // нормализуем входные значения от датчика подсветки
+  if (_Ambient < curConfig._min_ambient_value) _Ambient = curConfig._min_ambient_value;
+  if (_Ambient > curConfig._max_ambient_value) _Ambient = curConfig._max_ambient_value;
+  v_CurrAmbient = _Ambient;  
+  // собственно расчитываем значение PWM от датчика
+  ret_PWM = map(_Ambient, curConfig._min_ambient_value, curConfig._max_ambient_value, curConfig._min_auto_pwm, curConfig._max_auto_pwm);
+  // значения по умолчанию являются наиболее широкими параметрами, поэтому для безопасности - вгоняем возвращаемое значение в эти пределы
+  // т.е. нормализуем выходное значение PWM
+  if (ret_PWM > DEF_MAX_AUTO_PWM) ret_PWM = DEF_MAX_AUTO_PWM;
+  if (ret_PWM < DEF_MIN_AUTO_PWM) ret_PWM = DEF_MIN_AUTO_PWM;
+  return ret_PWM;
+}
+
+void SetGoalBrightness() {
+// ---- устанавливаем целевую яркость подсветки по текущему состоянию 
+const uint16_t oldGoalBrightness = v_GoalBrightness;
+
+  switch (curConfig.vu_light_mode) {   // "off"|"on_low"|"on_middle"|"on_high"|"auto"
+    case 0:          // режим выключенной подсветки "off"
+      v_GoalBrightness = 0;                                       
+      break;
+    case 1:          // режим минимальной ручной подсветки "on_low"
+      v_GoalBrightness = curConfig._min_manual_pwm;                                       
+      break;
+    case 2:          // режим минимальной ручной подсветки "on_middle"
+      v_GoalBrightness = curConfig._mid_manual_pwm;                                       
+      break;
+    case 3:          // режим минимальной ручной подсветки "on_low"
+      v_GoalBrightness = curConfig._max_manual_pwm;                                       
+      break;
+    case 4:          // переключились в автоматический режим
+      v_GoalBrightness = CalcBrightnessByAmbient(v_CurrAmbient);                        // настраиваем по текущей яркости датчика
+      break;
+  }
+  if (!s_AmpPowerOn) v_GoalBrightness = 0;                                              // если усилитель выключен - целевая яркость = 0 
+  f_HasDataForSync = f_HasDataForSync or (v_GoalBrightness != oldGoalBrightness);       // сохраняем или взводим флаг необходимости синхронизации - если значение поменялось     
 }
 
 bool ReadEEPROMConfig (){
@@ -528,8 +577,8 @@ void wifiTask(void *pvParam) {
           vTaskDelay(pdMS_TO_TICKS(500));       // отдаем управление и ждем 0.5 секунды перед следующей проверкой
         }
       }
-      if (count_GetWiFiConfig == C_MAX_FAILED_TRYS) s_CurrentWIFIMode = WF_OFF;      // если достигнуто количество попыток соединения для получения конфигурации по WIFi - выключаем WIFI
-        else s_CurrentWIFIMode = WF_UNKNOWN;                                        // если нет - переключаемся в режим попытки установления связи с роутером
+      if (count_GetWiFiConfig == C_MAX_FAILED_TRYS) s_CurrentWIFIMode = WF_OFF;       // если достигнуто количество попыток соединения для получения конфигурации по WIFi - выключаем WIFI
+        else s_CurrentWIFIMode = WF_UNKNOWN;                                          // если нет - переключаемся в режим попытки установления связи с роутером
       break; 
     }
     // запоминаем точку конца цикла
@@ -540,12 +589,31 @@ void wifiTask(void *pvParam) {
 
 void oneWireTask(void *pvParam) {
 // задача по поддержанию работы через шину OneWire BUS
+uint16_t tmp_RecieveCRC = 0;                                                          // переменная для расчёта CRC полученного пакета
+
   while (true) {
-
-
-    vTaskDelay(1/portTICK_PERIOD_MS); 
-
-
+    // в начале блокируем семафор доступа к входному пакету данных
+    while ( xSemaphoreTake(sem_InputOWBPacket,(TickType_t) 10) != pdTRUE ) {
+      vTaskDelay(1/portTICK_PERIOD_MS);         
+    }
+    if (OneWireBus.GetData((uint8_t*)&InOWBBuffer,sizeof(InOWBBuffer))) { // если пакет смогли прочитать - то:
+      tmp_RecieveCRC = GetCrc16Simple((uint8_t*)&InOWBBuffer, sizeof(InOWBBuffer)-4);
+      if (InOWBBuffer.simple_crc16 == tmp_RecieveCRC) { // если целостность пакета подтверждена CRC - то рассматриваем его как команды              
+        #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода           
+        Serial.printf("Recieve OWB packet with CRC=%04X\n",InOWBBuffer.simple_crc16);
+        #endif        
+        f_HasOWBPacket = true;
+        // уходим в асинхронную обработку и отдадим семафор только после преобразования OWB пакета в команды
+      }  
+      else {
+        xSemaphoreGive( sem_InputOWBPacket );  // если CRC не сошлась - снимаем семафор
+        #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода           
+        Serial.printf("!!!Bad CRC=%04X for recieve OWB packet!\n",InOWBBuffer.simple_crc16);
+        #endif        
+      }
+    }  
+    else xSemaphoreGive( sem_InputOWBPacket );    // если данных нет - так же снимаем семафор        
+    vTaskDelay(pdMS_TO_TICKS(C_OWB_READ_BUS_DELAY));                // делаем задержку в чтении следующего цикла
   }
 }
 
@@ -575,6 +643,7 @@ void cmdSwitchInput(const bool InpMode) { // команда переключен
   if (InpMode != curConfig.inp_selector) {                                                   // проверяем, что необходимо переключить вход
     f_HasChanges = true;                                                                     // взводим флаг изменения
     f_HasReportNow = true;                                                                   // взводим флаг отчёта об изменении состояния
+    f_HasDataForSync = true;                                                                 // взводим флаг необходимости синхронизации
     curConfig.inp_selector = InpMode;                                                        // собственно переключаем вход
     if (curConfig.inp_selector) digitalWrite(RELAY_SELECTOR_PIN, LOW);                       // подключаем вход RCA    
       else digitalWrite(RELAY_SELECTOR_PIN, HIGH);                                           // подключаем вход XLR    
@@ -594,6 +663,7 @@ void cmdEnableOWBSync(const bool _Mode) {
   if (curConfig.sync_by_owb != _Mode) {
     curConfig.sync_by_owb = _Mode;
     f_HasReportNow = true;   
+    f_HasDataForSync = curConfig.sync_by_owb;                                               // взводим флаг необходимости синхронизации    
   }
 }
 
@@ -612,9 +682,8 @@ void cmdChangeVULightMode(const char * _Mode) {
       curConfig.vu_light_mode = i;              // устанавливаем правильный режим
       f_HasReportNow = true;                    // отчитываемся об этом
       f_HasChanges = true;                      // устанавливаем флаг наличия изменений
-
-      // TODO: расчитываем новые значения для текущей яркости и применяем их
-
+      SetGoalBrightness();                      // расчитываем новое значение для текущей яркости
+      f_HasDataForSync = true;                  // взводим флаг необходимости синхронизации 
       break;  
     } 
  }
@@ -622,35 +691,37 @@ void cmdChangeVULightMode(const char * _Mode) {
 
 void cmdChangeManualPWMSet(uint16_t _min, uint16_t _mid, uint16_t _max) {
 // функция изменения параметров яркости ручного режима
+  #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+  Serial.printf("Set manual PWM to [%u,%u,%u] \n",_min,_mid,_max);
+  #endif   
   curConfig._min_manual_pwm = _min;
   curConfig._mid_manual_pwm = _mid;
   curConfig._max_manual_pwm = _max;
   f_HasChanges = true; 
-
-  // TODO: расчитываем новые значения для текущей яркости и применяем их
-
+  SetGoalBrightness();                          // расчитываем новое значение для текущей яркости
 }
 
 void cmdChangeAutoPWMSet(uint16_t _min, uint16_t _max) {
-// функция изменения параметров яркости автоматического режима
+// функция изменения параметров яркости автоматического режима  
+  #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+  Serial.printf("Set borders for auto PWM to [%u,%u] \n",_min,_max);
+  #endif   
   curConfig._min_auto_pwm = _min;
   curConfig._max_auto_pwm = _max;
   f_HasChanges = true; 
-
-  // TODO: расчитываем новые значения для текущей яркости и применяем их
-
+  SetGoalBrightness();                          // расчитываем новое значение для текущей яркости
 }
 
 void cmdChangeSensorMapSet(uint16_t _min, uint16_t _max) {
 // вызываем функцию изменения параметров мапировки сенсора
+  #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+  Serial.printf("Set range for sensor to [%u,%u] \n",_min,_max);
+  #endif   
   curConfig._min_ambient_value = _min;
   curConfig._max_ambient_value = _max;
   f_HasChanges = true; 
-
-  // TODO: расчитываем новые значения для текущей яркости и применяем их
-
+  SetGoalBrightness();                          // расчитываем новое значение для текущей яркости
 }
-
 
 void cmdPowerON() {
 // команда включения усилителя
@@ -662,8 +733,10 @@ void cmdPowerON() {
     digitalWrite(RELAY_POWER_PIN, HIGH);                 // включаем основной силовой блок питания
     tm_TogglePower = millis();                           // запоминаем момент включения основного питания 
     s_VU_Enable = false;                                 // запрещаем работу стрелочного указателя на период переходных процессов    
+    SetGoalBrightness();                                 // расчитываем новое значение для текущей яркости
     f_HasChanges = true;
     f_HasReportNow = true;
+    f_HasDataForSync = true;                             // взводим флаг необходимости синхронизации          
   }
 }
 
@@ -673,13 +746,15 @@ void cmdPowerOFF() {
   Serial.printf("Switch power from %s to OFF\n",s_AmpPowerOn ? jv_ON : jv_OFF);
   #endif    
   if (s_AmpPowerOn) { // если усилитель еще не выключен 
+    s_AmpPowerOn = false;                                // отмечаем текущее состояние  
     CheckAndUpdateEEPROM();                              // запоминаем текущую конфигурацию  
     digitalWrite(RELAY_POWER_PIN, LOW);                  // выключаем основной силовой блок питания  
     tm_TogglePower = millis();                           // запоминаем момент выключения основного питания 
     s_VU_Enable = false;                                 // запрещаем работу стрелочного указателя на период переходных процессов    
-    s_AmpPowerOn = false;
     f_HasChanges = true;  
     f_HasReportNow = true;  
+    SetGoalBrightness();                                 // расчитываем новое значение для текущей яркости = 0       
+    f_HasDataForSync = true;                             // взводим флаг необходимости синхронизации              
   }
 }
 
@@ -706,6 +781,12 @@ void eventHandlerTask (void *pvParam) {
         f_HasChanges = true;
       }
     }      
+    // обработка значений датчика освещенности для установки нового уровня яркости в случае необходимости
+    if ((millis()-tm_LastAmbientCheck) > C_AMBIENT_CHECK_DELAY) {
+      v_CurrAmbient = analogRead(AMBIENT_SENSOR_PIN);                 // начитываем значение для уровня освещенности
+      SetGoalBrightness();                                            // устанавливаем текущее значение целевой яркости если нужно
+      tm_LastAmbientCheck = millis();                                 // запоминаем момент обновления для следующей задержки
+    }
     //-------------------- обработка событий получения MQTT команд в приложение ----------------------
     if ( f_HasMQTTCommand ) {                                         // превращаем события MQTT в команды для отработки приложением    
       // защищаем секцию работы с Static JSON DOC с помощью мьютекса
@@ -762,9 +843,6 @@ void eventHandlerTask (void *pvParam) {
         uint16_t _max_manual = DEF_MAX_MANUAL_PWM;
         if (InputJSONdoc[jk_LIGHT_MANUAL_SET][2].is<int16_t>()) _max_manual = InputJSONdoc[jk_LIGHT_MANUAL_SET][2];
         if ((_min_manual<=_mid_manual) and (_mid_manual<=_max_manual)) {  // простейшая проверка на валидность значений
-          #ifdef DEBUG_LEVEL_PORT                                            
-          Serial.printf("New set for manual light is: min=%u mid=%u max=%u \n",_min_manual,_mid_manual,_max_manual);
-          #endif
           cmdChangeManualPWMSet(_min_manual,_mid_manual,_max_manual);                        // вызываем функцию изменения параметров яркости ручного режима
           }
         else {
@@ -780,9 +858,6 @@ void eventHandlerTask (void *pvParam) {
         uint16_t _max_auto = DEF_MAX_AUTO_PWM;
         if (InputJSONdoc[jk_LIGHT_AUTO_SET][1].is<int16_t>()) _max_auto = InputJSONdoc[jk_LIGHT_AUTO_SET][1];
         if (_min_auto<=_max_auto) {  // простейшая проверка на валидность значений
-          #ifdef DEBUG_LEVEL_PORT                                            
-          Serial.printf("New set for auto light is: min=%u max=%u \n",_min_auto,_max_auto);
-          #endif
           cmdChangeAutoPWMSet(_min_auto,_max_auto);                                         // вызываем функцию изменения параметров яркости автоматического режима
           }
         else {
@@ -798,9 +873,6 @@ void eventHandlerTask (void *pvParam) {
         uint16_t _max_sens = DEF_MAX_AMBIENT_VALUE;
         if (InputJSONdoc[jk_AMBIENT_SET][1].is<int16_t>()) _max_sens = InputJSONdoc[jk_AMBIENT_SET][1];
         if (_min_sens<_max_sens) {  // простейшая проверка на валидность значений
-          #ifdef DEBUG_LEVEL_PORT                                            
-          Serial.printf("New map for ambient sensor is: min=%u max=%u \n",_min_sens,_max_sens);
-          #endif
           cmdChangeSensorMapSet(_min_sens,_max_sens);                                         // вызываем функцию изменения параметров мапировки сенсора
           }
         else {
@@ -810,7 +882,6 @@ void eventHandlerTask (void *pvParam) {
         }
       }
       f_HasMQTTCommand = false;                                       // сбрасываем флаг наличия изменений через MQTT 
-      InputJSONdoc.clear();                                           // очищаем входной документ
       xSemaphoreGive(sem_InputJSONdoc);                               // отпускаем семафор обработки входного сообщения
     }
     //--------------------- опрос кнопок - получение команд от лицевой панели ------------------------
@@ -874,9 +945,23 @@ void eventHandlerTask (void *pvParam) {
       }  
     }
     //----------------------------- получение команды по OneWireBUS ----------------------------------
-
-    // TODO: Обрабатываем команды OneWireBUS
-    
+    if (f_HasOWBPacket) { // есть пакет для обработки принятый по OneWireBUS
+      // обрабатываем команду переключения входа
+      if (InOWBBuffer.power_on != s_AmpPowerOn) {              
+        if (InOWBBuffer.power_on) cmdPowerON();
+          else cmdPowerOFF();          
+      }
+      // обрабатываем команду переключения входа
+      if (InOWBBuffer.inp_selector != curConfig.inp_selector) cmdSwitchInput(InOWBBuffer.inp_selector);
+      // обрабатываем команду переключения режима подсветки
+      if (InOWBBuffer.vu_light_mode != curConfig.vu_light_mode) cmdChangeVULightMode(VU_mode_str[InOWBBuffer.vu_light_mode]);     // переключаем на нужный режим освещения 
+      #ifdef DEBUG_LEVEL_PORT                                 // вывод в порт при отладке кода 
+      Serial.println("Обработали OWB пакет!");
+      #endif    
+      xSemaphoreGive(sem_InputOWBPacket);                     // отпускаем семафор обработки входного сообщения 
+      f_HasDataForSync = false;                               // не даем формировать ответный пакет синхронизации
+      f_HasOWBPacket = false;
+    }
     // отдаем управление ядру FreeRT OS
     vTaskDelay(1/portTICK_PERIOD_MS); 
   }
@@ -933,14 +1018,32 @@ void applayChangesTask (void *pvParam) {
       else digitalWrite(TRIGGER_OUT_PIN, s_AmpPowerOn);  // иначе выход Trigger_OUT поднимаем, когда включен усилитель и разрешен Trigger_OUT
       }  
     else digitalWrite(TRIGGER_OUT_PIN, LOW);  // если внешний триггер запрещен - держим его выключенным    
+  // этот блок работы с подсветкой шкалы VU индикатора 
+  int  tmp_Delta = 1;
+  // меняем значение подсветки на текущую  
+  ledcWrite(c_PWM_Channel, v_CurrBrightness);    
+  // отслеживаем изменение разницы целевой подсветки и текущей - текущую тянем к целевой с задержкой
+  if (((millis()-tm_LastBrightnessSet) > C_BRIGHTNESS_SET_DELAY) and (v_CurrBrightness != v_GoalBrightness)) {
+  // здесь финт ушами по плавной коррекции значения текущей подсветки - плавность зависит от задержки C_BRIGHTNESS_SET_DELAY
+    tm_LastBrightnessSet = millis();                                    // запоминаем последнее изменение
+    if (v_CurrBrightness > v_GoalBrightness) {                          // нужно уменьшать текущую яркость на величину ошибки
+       // методом деления ошибки на пополам, приходим к нужной величине 
+       tmp_Delta = (v_CurrBrightness-v_GoalBrightness)/2;               // вычисляем половинную величину ошибки
+       if (tmp_Delta == 0) tmp_Delta = 1;                               // если ошибка ушла за предел точности, то ошибка = 1
+       v_CurrBrightness = v_CurrBrightness - tmp_Delta;                 // уменьшаем рассчитанную текущую яркость на половину ошибки
+    }
+    if (v_CurrBrightness < v_GoalBrightness) {                          // увеличиваем текущую яркость на величину ошибки
+       // методом деления ошибки на пополам, приходим к нужной величине 
+       tmp_Delta = (v_GoalBrightness-v_CurrBrightness)/2;               // вычисляем половинную величину ошибки
+       if (tmp_Delta == 0) tmp_Delta = 1;                               // если ошибка ушла за предел точности, то ошибка = 1
+       v_CurrBrightness = v_CurrBrightness + tmp_Delta;                 // увеличиваем рассчитанную текущую освещенность на половину ошибки
+    }
+  }   
     // ----- ниже исполняется только то, что отмечено флагом изменений f_HasChanges ----
     if (f_HasChanges) {
       // включаем/выключаем стрелочки 
       if (s_VU_Enable) digitalWrite(MUTE_VU_PIN, LOW); // включаем стрелочки MUTE_VU_PIN = 0
         else digitalWrite(MUTE_VU_PIN, HIGH); // выключаем стрелочки MUTE_VU_PIN = 1
-
-      // TODO: применяем изменения отмеченные флагом
-
       f_HasChanges = false;
     }
     vTaskDelay(1/portTICK_PERIOD_MS); 
@@ -950,9 +1053,35 @@ void applayChangesTask (void *pvParam) {
 void sendCommandTask (void *pvParam) {
 // шлем команду по OneWireBUS
   while (true) {
-    
+    if (curConfig.sync_by_owb and f_HasDataForSync) {                                 // если есть данные для синхронизации и она разрешена
+        // готовим данные для передачи
+        OutOWBBuffer.inp_selector = curConfig.inp_selector;
+        OutOWBBuffer.power_on = s_AmpPowerOn;
+        OutOWBBuffer.vu_light_mode = curConfig.vu_light_mode;
+//        OutOWBBuffer.vu_light_value = v_GoalBrightness;
+        OutOWBBuffer.simple_crc16 = GetCrc16Simple((uint8_t*)&OutOWBBuffer, sizeof(OutOWBBuffer)-4);
+        // и собственно передаем через OneWireBUS
+        if (OneWireBus.SendData(BROADCAST_ADDR,(u_char*)&OutOWBBuffer, sizeof(OutOWBBuffer)))  {
+          #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода           
+          Serial.printf("Send OWB packet with CRC=%04X\n",OutOWBBuffer.simple_crc16);
+          #endif        
+          f_HasDataForSync = false;     // сбрасываем флаг синхронизации
+          v_OWBErrorCount = 0;          // сбрасываем счётчик ошиок передачи 
+          }
+        else {
+          v_OWBErrorCount++;
+          if (v_OWBErrorCount > C_MAX_LOST_ON_OWB) {      // если счётчик подряд НЕ ОТПРАВЛЕННЫХ пакетов достиг максимума потерь      
+            v_OWBErrorCount = 0;                          // сбрасываем счётчик
+            curConfig.sync_by_owb = false;                // запрещаем синхронизацию
+            f_HasReportNow = true;                        // рапортуем об этом
+            vTaskDelay(pdMS_TO_TICKS(C_OWB_TRY_DELAY + random(v_OWBErrorCount+1)));   // делаем задержку перед следующей отправкой на случайный промежуток времени
+          }
+          #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода                     
+          Serial.println("!!!Error of send OWB packet!");
+          #endif            
+        }
+    }
     vTaskDelay(1/portTICK_PERIOD_MS);     
-
   }
 }
 
@@ -1008,6 +1137,9 @@ void reportTask (void *pvParam) {
         Serial.printf("%s : %s\n", jk_TRIGGER_OUT, digitalRead(TRIGGER_OUT_PIN) ? jv_ON : jv_OFF);
         Serial.printf("%s : %s\n", jk_TRIGGER_BYPASS, curConfig.sync_trigger_in_out ? jv_ON : jv_OFF );
         Serial.printf("%s : %s\n", jk_SYNC_BY_OWB, curConfig.sync_by_owb ? jv_ON : jv_OFF );
+        Serial.printf("%s : [%u,%u%,%u] \n", jk_LIGHT_MANUAL_SET,curConfig._min_manual_pwm,curConfig._mid_manual_pwm,curConfig._max_manual_pwm);
+        Serial.printf("%s : [%u,%u] \n", jk_LIGHT_AUTO_SET,curConfig._min_auto_pwm,curConfig._max_auto_pwm);
+        Serial.printf("%s : [%u,%u] \n", jk_AMBIENT_SET,curConfig._min_ambient_value,curConfig._max_ambient_value);                
         Serial.println("<<<< End of current report >>>>");
       #endif                
       tm_LastReportToMQTT = millis();           // взводим интервал отсчёта
@@ -1081,13 +1213,21 @@ void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties 
     while ( xSemaphoreTake(sem_InputJSONdoc,(TickType_t) 10) != pdTRUE ) {
       vTaskDelay(1/portTICK_PERIOD_MS);         
     }
-    deserializeJson(InputJSONdoc, messageTemp);                  // десерилизуем сообщение и взводим признак готовности к обработке
-    // для коротких сообщений без ключей дополняем DOC объект
-    if (strstr(payload,jc_CLR_CONFIG) != NULL ) InputJSONdoc[jc_CLR_CONFIG] = true;
-    if (strstr(payload,jc_RESET) != NULL ) InputJSONdoc[jc_RESET] = true;
-    if (strstr(payload,jc_REPORT) != NULL ) InputJSONdoc[jc_REPORT] = true;
-    f_HasMQTTCommand = true;                            // взводим флаг получения команды по MQTT
-    // отдадим семафор обработки документа только после преобразования JSON документа в команды
+    DeserializationError err = deserializeJson(InputJSONdoc, messageTemp);                    // десерилизуем сообщение и взводим признак готовности к обработке
+    if (err) {
+      #ifdef DEBUG_LEVEL_PORT         
+      Serial.print(F("Error of deserializeJson(): "));
+      Serial.println(err.c_str());
+      #endif
+      }
+    else {  
+      // для коротких сообщений без ключей дополняем DOC объект
+      if (strstr(payload,jc_CLR_CONFIG) != NULL ) InputJSONdoc[jc_CLR_CONFIG] = true;
+      if (strstr(payload,jc_RESET) != NULL ) InputJSONdoc[jc_RESET] = true;
+      if (strstr(payload,jc_REPORT) != NULL ) InputJSONdoc[jc_REPORT] = true;
+      f_HasMQTTCommand = true;                            // взводим флаг получения команды по MQTT
+      // отдадим семафор обработки документа только после преобразования JSON документа в команды
+    }
   }
   #ifdef DEBUG_LEVEL_PORT         
   Serial.printf("Publish received.\n  topic: %s\n  message: [", topic);
@@ -1099,8 +1239,9 @@ void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties 
 // начальная инициализация программы - выполняется при подаче дежурного питания.
 // дальнейшее включение усилителя - уже в рамках работающей программы
 void setup() {
+uint8_t MacAddress[8];                        // временная переменная для MAC адреса текущей ESP
 
-#ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода
+#ifdef DEBUG_LEVEL_PORT                       // вывод в порт при отладке кода
   // инициализируем порт отладки 
   Serial.begin(115200);
   Serial.println();
@@ -1136,6 +1277,10 @@ void setup() {
   tm_LastBrightnessSet = millis();                  // запоминаем момент последней установки яркости
   v_GoalBrightness = 0;                             // рассчитываем целевой уровень яркости подсветки
   v_CurrBrightness = v_GoalBrightness;              // инициализируем значение текущей яркости
+
+  // инициализация генератора случайных чисел MAC адресом
+  if (esp_efuse_mac_get_default(MacAddress) == ESP_OK) randomSeed(MacAddress[5]);
+    else randomSeed(millis());
 
   // создаем и инициализируем PWM канал, отключаем его, назначаем  VU выход в канал PWM
   ledcSetup(c_PWM_Channel, c_Freq, c_Resolution);  
@@ -1236,7 +1381,6 @@ void setup() {
   // настраиваем MQTT клиента
   mqttClient.setCredentials(curConfig.mqtt_usr,curConfig.mqtt_pwd);
   mqttClient.setServer(curConfig.mqtt_host, curConfig.mqtt_port);
-
   mqttClient.onConnect(onMqttConnect);
   mqttClient.onDisconnect(onMqttDisconnect);
   mqttClient.onSubscribe(onMqttSubscribe);
@@ -1246,29 +1390,17 @@ void setup() {
 
   // настраиваем семафоры - сбрасываем их
   xSemaphoreGive( sem_InputJSONdoc );
+  xSemaphoreGive( sem_InputOWBPacket );
 
   // создаем отдельные параллельные задачи, выполняющие группы функций  
   // стартуем основные задачи
-  if (xTaskCreate(eventHandlerTask, "events", 4096, NULL, 1, NULL) != pdPASS) {  // все плохо, задачу не создали
-    Halt("Error: Event handler task not created!");
-  }
-  if (xTaskCreate(applayChangesTask, "applay", 4096, NULL, 1, NULL) != pdPASS) { // все плохо, задачу не создали
-    Halt("Error: Applay changes task not created!");
-  }
-  if (xTaskCreate(sendCommandTask, "send", 4096, NULL, 1, NULL) != pdPASS) { // все плохо, задачу не создали
-    Halt("Error: Send command task not created!");
-  }
-  if (xTaskCreate(reportTask, "report", 4096, NULL, 1, NULL) != pdPASS) { // все плохо, задачу не создали
-    Halt("Error: Report task not created!");
-  }  
-  
+  if (xTaskCreate(eventHandlerTask, "events", 4096, NULL, 1, NULL) != pdPASS) Halt("Error: Event handler task not created!");     // все плохо, задачу не создали
+  if (xTaskCreate(applayChangesTask, "applay", 4096, NULL, 1, NULL) != pdPASS) Halt("Error: Applay changes task not created!");   // все плохо, задачу не создали
+  if (xTaskCreate(sendCommandTask, "send", 4096, NULL, 1, NULL) != pdPASS) Halt("Error: Send command task not created!");         // все плохо, задачу не создали
+  if (xTaskCreate(reportTask, "report", 4096, NULL, 1, NULL) != pdPASS) Halt("Error: Report task not created!");                  // все плохо, задачу не создали
   // стартуем коммуникационные задачи
-  if (xTaskCreate(oneWireTask, "onewire", 4096, NULL, 1, NULL) != pdPASS) { // все плохо, задачу не создали
-    Halt("Error: OneWire communication task not created!");
-  }  
-  if (xTaskCreate(wifiTask, "wifi", 4096*2, NULL, 1, NULL) != pdPASS) { // все плохо, задачу не создали
-    Halt("Error: WiFi communication task not created!");
-  }  
+  if (xTaskCreate(oneWireTask, "onewire", 4096, NULL, 1, NULL) != pdPASS) Halt("Error: OneWire communication task not created!"); // все плохо, задачу не создали
+  if (xTaskCreate(wifiTask, "wifi", 4096*2, NULL, 1, NULL) != pdPASS) Halt("Error: WiFi communication task not created!");        // все плохо, задачу не создали
 
 }
 
