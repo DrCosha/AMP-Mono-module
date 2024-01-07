@@ -67,7 +67,6 @@ extern "C" {
 
 #include <AsyncMqttClient.h>
 #include <ArduinoJson.h>
-#include "PageBuilder.h"
 
 // устанавливаем режим отладки
 #define DEBUG_LEVEL_PORT                          // устанавливаем режим отладки через порт
@@ -314,11 +313,6 @@ StaticJsonDocument<512> InputJSONdoc,          // создаем входящи�
 SemaphoreHandle_t sem_InputJSONdoc = xSemaphoreCreateBinary();                           // создаем двоичный семафор для доступа к JSON документу 
 SemaphoreHandle_t sem_InputOWBPacket = xSemaphoreCreateBinary();                         // создаем двоичный семафор для доступа к входному пакету принятому по OneWireBUS
 
-// Объявление страниц локального WEB сервера
-
-// Not found page
-PageElement NOTFOUND_PAGE_ELEMENT("<p style=\"font-size:36px;color:red;\">Woops!</p><p>404 - Page not found.</p>");
-PageBuilder NOTFOUND_PAGE({NOTFOUND_PAGE_ELEMENT});
 
 // =============================== общие процедуры и функции ==================================
 
@@ -656,10 +650,151 @@ uint16_t tmp_RecieveCRC = 0;                                                    
   }
 }
 
+void handleRootPage() {
+// процедура генерации основной страницы сервера  
+  String out_http_text = R"=====(
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset = "utf-8">
+<meta name='viewport' content='width=device-width, initial-scale=1.0'/>
+<title>DIY HiAmp configuration page</title>
+<style type="text/css">
+.button {
+  background-color: #4CAF50; /* Green */
+  border: none;
+  color: white;
+  border-radius: 6px;
+  padding: 12px 24px;
+  text-align: center;
+  text-decoration: none;
+  display: inline-block;
+  font-size: 15px;
+}
+.button:hover, .button:visited {
+  font-weight: bold; 
+  color: black;
+}
+</style>
+</head>
+
+<body style="background-color: #cccccc; Color: blue; ">
+<center>
+<div>
+<h1>WI-Fi LED CONTROL</h1>
+  <button class="button" onclick="send(1)">LED ON</button>
+  <button class="button" onclick="send(0)">LED OFF</button><BR>
+</div>
+ <br>
+<div><h2>
+  LED State: <span id="state"></span>
+</h2>
+<BR>
+<h3>Send data: <br>
+<input type="text" length=10 id="valdat"/>
+<button type="button" onclick="sendData()">send</button>
+</h3>
+<BR>
+<h3>READ data: <br>
+<span style="display: inline-block; width: 200px; height: 20px; border: 1px solid black; background-color: white; color: black;" id="readdat"></span><br><br>
+
+</h3>
+</div>
+<script>
+
+function loadDoc()
+{
+  var xhttp = new XMLHttpRequest();
+  xhttp.onreadystatechange = function() {
+    if (this.readyState == 4 && this.status == 200) {
+      document.getElementById("state").innerHTML = this.responseText;
+    }
+  };
+  xhttp.open("GET", "getdata?state="+0, true);
+  xhttp.send();
+}
+
+function send(led_sts) 
+{
+  var xhttp = new XMLHttpRequest();
+  xhttp.onreadystatechange = function() {
+    if (this.readyState == 4 && this.status == 200) {
+      document.getElementById("state").innerHTML = this.responseText;
+    }
+  };
+  xhttp.open("GET", "setdata?state="+led_sts, true);
+  xhttp.send();
+}
+
+function sendData() 
+{
+  var xhttp = new XMLHttpRequest();
+  document.getElementById("valdat")
+  xhttp.onreadystatechange = function() {
+    if (this.readyState == 4 && this.status == 200) {
+      document.getElementById("valdat").innerHTML = this.responseText;
+          }
+  };
+  xhttp.open("GET", "setdata?value=" + document.getElementById("valdat").value, true);
+  xhttp.send();
+}
+setInterval(function() 
+{
+  getData();
+}, 1000); 
+
+function getData() {
+  var xhttp = new XMLHttpRequest();
+  xhttp.onreadystatechange = function() {
+    if (this.readyState == 4 && this.status == 200) {
+      document.getElementById("readdat").innerHTML =
+      this.responseText;
+    }
+  };
+  xhttp.open("GET", "getdata", true);
+  xhttp.send();
+}
+
+loadDoc();
+
+</script>
+</center>
+</body>
+</html>
+)=====";
+  WEB_Server.send ( 200, "text/html", out_http_text );
+}
+
+void handleNotFoundPage() {
+// процедура генерации страницы сервера c 404-й ошибкой
+  String out_http_text = "<body>!!! 404 !!!</body>";
+  Serial.println("<<<Page not found!");    
+  WEB_Server.send ( 404, "text/html", out_http_text );
+}
+
+void handleSetDataPage() {
+// процедура передачи данных в контроллер со страницы клиента
+  String Str1 = WEB_Server.arg("value");
+  String Str2 = WEB_Server.arg("state");
+  Serial.print("<<<Set data value: ");  Serial.print(Str1); Serial.print(" state:");  Serial.println(Str2);  
+}
+
+void handleGetDataPage() {
+// процедура чтения данных из контроллера и передачи их на страницу клиента
+  String out_http_text = "";
+  Serial.println(">>>Get data");
+  if (s_AmpPowerOn) out_http_text = "ON";
+    else out_http_text = "OFF";
+  WEB_Server.send(200, "text/plane", out_http_text);
+}
+
 void webServerTask(void *pvParam) {
 // задача по обслуживанию WEB сервера модуля
 // присваиваем ресурсы (страницы) нашему WEB серверу - страницы объявлены заранее и являются статическими
-  NOTFOUND_PAGE.atNotFound(WEB_Server);		                              // добавляем страницу с 404-й ошибкой 
+  WEB_Server.on("/", handleRootPage);		                              // добавляем корневую страницу
+  WEB_Server.on("/setdata",handleSetDataPage);                        // страница, на котрую передаются данные для новой конфигурации
+  WEB_Server.on("/getdata",handleGetDataPage);                        // страница, c которой читаются данные из контроллера
+  WEB_Server.onNotFound(handleNotFoundPage);		                      // добавляем страницу с 404-й ошибкой   
   bool _FirstTime = true;
   while (true) {
     if (f_WEB_Server_Enable) {  // если разрешена работа WEB сервера
@@ -668,15 +803,6 @@ void webServerTask(void *pvParam) {
           WEB_Server.begin();                                               // регистрируем сервер 
           _FirstTime = false;
       }    
-
-
-
-// TODO:  обрабатываем вызовы сервера
-
-
-
-
-
       WEB_Server.handleClient();
       } 
     else {
