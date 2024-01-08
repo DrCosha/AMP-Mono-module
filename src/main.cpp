@@ -35,18 +35,23 @@ MQTT соединения нет, то периодически пытаемся
 
 Команды в топике команд:
 
-  {"clear_config"}                          - очистить Flash память и загрузится с конфигурацией по умолчанию
-  {"reset"}                                 - перезагрузить контроллер управления усилителем 
-  {"report"}                                - сформировать отчет о текущем состоянии в топик REPORT  
-  {"power":"on"|"off"}                      - включить/выключить модуль
-  {"input":"rca"|"xlr"}                     - выбор входа для усилителя  
-  {"trigger_enable":"on"|"off"}             - разрешить/запретить работу триггеров
-  {"owb_sync":"on"|"off"}                   - разрешение синхронизации по OneWireBUS
-  {"bypass":"on"|"off"}                     - разрешение прямой проброски триггерного сигнала с входа на выход
-  {"vu_light": "off"|"on_low"|"on_middle"|"on_high"|"auto"}  - режим работы подсветки VU индикатора 
-  {"light_manual": [<value1>,<value2>,<value3>]}             - значения PWM для подстройки яркости освещения в режимах "on_low","on_middle","on_high"
-  {"light_auto": [<min_value>,<max_value>]}                  - значения PWM для подстройки границ изменения автоматической яркости
-  {"ambient": [<min_value>,<max_value>]}                     - подстройка границ входного сигнала сенсора освещенности
+  // команда управления конфигурацией
+  {"clear_config"}                                          - очистить Flash память и загрузится с конфигурацией по умолчанию
+
+  // основные команды управления  
+  {"reset"}                                                 - перезагрузить контроллер управления усилителем 
+  {"report"}                                                - сформировать отчет о текущем состоянии в топик REPORT  
+  {"power":"on"|"off"}                                      - включить/выключить модуль
+  {"input":"rca"|"xlr"}                                     - выбор входа для усилителя  
+  {"vu_light": "off"|"on_low"|"on_middle"|"on_high"|"auto"} - режим работы подсветки VU индикатора 
+
+  // команды настройки параметров
+  {"trigger_enable":"on"|"off"}                             - разрешить/запретить работу триггеров
+  {"owb_sync":"on"|"off"}                                   - разрешение синхронизации по OneWireBUS
+  {"bypass":"on"|"off"}                                     - разрешение прямой проброски триггерного сигнала с входа на выход
+  {"light_manual": [<value1>,<value2>,<value3>]}            - значения PWM для подстройки яркости освещения в режимах "on_low","on_middle","on_high"
+  {"light_auto": [<min_value>,<max_value>]}                 - значения PWM для подстройки границ изменения автоматической яркости
+  {"ambient_sens": [<min_value>,<max_value>]}               - подстройка границ входного сигнала сенсора освещенности
 
 */
 
@@ -144,9 +149,10 @@ extern "C" {
 #define C_MAX_MQTT_FAILED_TRYS 10                 // количество попыток соединения с MQTT сервером перед тем как начать поднимать AP точку
 
 // определяем топики для работы устройства по MQTT
-#define P_LWT_TOPIC   "diy/hires_amp_01/LWT"      // топик публикации доступности устройства
-#define P_SET_TOPIC   "diy/hires_amp_01/set"      // топик публикации команд для устройства
-#define P_STATE_TOPIC "diy/hires_amp_01/state"    // топик публикации состояния устройства
+#define P_LWT_TOPIC    "diy/hires_amp_01/LWT"      // топик публикации доступности устройства
+#define P_SET_TOPIC    "diy/hires_amp_01/set"      // топик публикации команд для устройства
+#define P_STATE_TOPIC  "diy/hires_amp_01/state"    // топик публикации основных параметров состояния устройства - !!!! этот топик может быть использован в качестве управляющего для следующего контроллера !!!!
+#define P_MISC_TOPIC   "diy/hires_amp_01/misc"     // топик публикации вспомогательных параметров устройства
 
 // определяем константы для параметров и команд JSON формата в MQTT
 // --- имена команд ---
@@ -222,8 +228,9 @@ struct GlobalParams {
   uint16_t        mqtt_port;                      // порт подключения к MQTT серверу
 // параметры очередей MQTT
   char            command_topic[80];              // топик получения команд
-  char            report_topic[80];               // топик отправки состояния 
+  char            report_topic[80];               // топик отправки текущего состояния устройства
   char            lwt_topic[80];                  // топик доступности устройства
+  char            misc_topic[80];                 // топик отправки состояния внутренних параметров
 // корректируемы установки используемые для подсветки индикатора
   uint16_t        _max_auto_pwm,                  // максимальное значение яркости при авто регулировании подсветки
                   _min_auto_pwm,                  // минимальное значение яркости при авто регулировании подсветки
@@ -313,11 +320,12 @@ StaticJsonDocument<512> InputJSONdoc,          // создаем входящи�
 SemaphoreHandle_t sem_InputJSONdoc = xSemaphoreCreateBinary();                           // создаем двоичный семафор для доступа к JSON документу 
 SemaphoreHandle_t sem_InputOWBPacket = xSemaphoreCreateBinary();                         // создаем двоичный семафор для доступа к входному пакету принятому по OneWireBUS
 
+// наименование 
+String ControllerName = "HiAMP_";                                                        // имя нашего контроллера
 
 // =============================== общие процедуры и функции ==================================
 
-uint16_t GetCrc16Simple( uint8_t * data, uint16_t len ) {
-// ------------------- процедура упрощенного расчета CRC16 для блока данных -------------------   
+uint16_t GetCrc16Simple( uint8_t * data, uint16_t len ) { // процедура упрощенного расчета CRC16 для блока данных
   uint8_t lo;
   union // представляем crc как слово и как верхний и нижний байт
   {
@@ -344,8 +352,7 @@ uint16_t GetCrc16Simple( uint8_t * data, uint16_t len ) {
      return crc.value;
 }
 
-static void Halt(const char *msg) {
-//  процедура аварийного останова контроллера при критических ошибках в ходе выполнения
+static void Halt(const char *msg) { //  процедура аварийного останова контроллера при критических ошибках в ходе выполнения
 #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода
   Serial.println(msg);        // выводим сообщение
   Serial.flush();
@@ -353,8 +360,7 @@ static void Halt(const char *msg) {
   esp_deep_sleep_start();     // останавливаем контроллер
 }
 
-void SetConfigByDefault() {
-// ------------------- устанавливаем значения в блоке конфигурации по умолчанию --------------  
+void SetConfigByDefault() { // устанавливаем значения в блоке конфигурации по умолчанию
       memset((void*)&curConfig,0,sizeof(curConfig));    // обнуляем область памяти и заполняем ее значениями по умолчанию
       curConfig.inp_selector = INP_XLR;                                               // по умолчанию XLR
       curConfig.vu_light_mode = MAX_VU_MODE-1;                                        // значение auto     
@@ -372,6 +378,7 @@ void SetConfigByDefault() {
       memcpy(curConfig.command_topic,P_SET_TOPIC,sizeof(P_SET_TOPIC));                // сохраняем наименование командного топика
       memcpy(curConfig.report_topic,P_STATE_TOPIC,sizeof(P_STATE_TOPIC));             // сохраняем наименование топика состояния
       memcpy(curConfig.lwt_topic,P_LWT_TOPIC,sizeof(P_LWT_TOPIC));                    // сохраняем наименование топика доступности
+      memcpy(curConfig.misc_topic,P_MISC_TOPIC,sizeof(P_MISC_TOPIC));                 // сохраняем наименование топика прочих параметров
       curConfig.mqtt_port = P_MQTT_PORT;
       // инициализируем значения PWM и границ регулирования
       curConfig._max_auto_pwm = DEF_MAX_AUTO_PWM;                                     // максимальное значение яркости при авто регулировании подсветки
@@ -385,49 +392,7 @@ void SetConfigByDefault() {
       curConfig.simple_crc16 = GetCrc16Simple((uint8_t*)&curConfig, sizeof(curConfig)-4);     // считаем CRC16      
 }
 
-int CalcBrightnessByAmbient(int _Ambient) {  
-// ------------------ рассчитываем уровень яркости подсветки по внешнему датчику ----------------
-int ret_PWM = curConfig._min_auto_pwm;
-  // нормализуем входные значения от датчика подсветки
-  if (_Ambient < curConfig._min_ambient_value) _Ambient = curConfig._min_ambient_value;
-  if (_Ambient > curConfig._max_ambient_value) _Ambient = curConfig._max_ambient_value;
-  v_CurrAmbient = _Ambient;  
-  // собственно расчитываем значение PWM от датчика
-  ret_PWM = map(_Ambient, curConfig._min_ambient_value, curConfig._max_ambient_value, curConfig._min_auto_pwm, curConfig._max_auto_pwm);
-  // значения по умолчанию являются наиболее широкими параметрами, поэтому для безопасности - вгоняем возвращаемое значение в эти пределы
-  // т.е. нормализуем выходное значение PWM
-  if (ret_PWM > DEF_MAX_AUTO_PWM) ret_PWM = DEF_MAX_AUTO_PWM;
-  if (ret_PWM < DEF_MIN_AUTO_PWM) ret_PWM = DEF_MIN_AUTO_PWM;
-  return ret_PWM;
-}
-
-void SetGoalBrightness() {
-// ---- устанавливаем целевую яркость подсветки по текущему состоянию 
-const uint16_t oldGoalBrightness = v_GoalBrightness;
-
-  switch (curConfig.vu_light_mode) {   // "off"|"on_low"|"on_middle"|"on_high"|"auto"
-    case 0:          // режим выключенной подсветки "off"
-      v_GoalBrightness = 0;                                       
-      break;
-    case 1:          // режим минимальной ручной подсветки "on_low"
-      v_GoalBrightness = curConfig._min_manual_pwm;                                       
-      break;
-    case 2:          // режим минимальной ручной подсветки "on_middle"
-      v_GoalBrightness = curConfig._mid_manual_pwm;                                       
-      break;
-    case 3:          // режим минимальной ручной подсветки "on_low"
-      v_GoalBrightness = curConfig._max_manual_pwm;                                       
-      break;
-    case 4:          // переключились в автоматический режим
-      v_GoalBrightness = CalcBrightnessByAmbient(v_CurrAmbient);                        // настраиваем по текущей яркости датчика
-      break;
-  }
-  if (!s_AmpPowerOn) v_GoalBrightness = 0;                                              // если усилитель выключен - целевая яркость = 0 
-  f_HasDataForSync = f_HasDataForSync or (v_GoalBrightness != oldGoalBrightness);       // сохраняем или взводим флаг необходимости синхронизации - если значение поменялось     
-}
-
-bool ReadEEPROMConfig (){
-// ------------------- чтение конфигурации из EEPROM в буфер curConfig --------------------
+bool ReadEEPROMConfig (){ // чтение конфигурации из EEPROM в буфер curConfig
   uint16_t tmp_CRC;
 
   EEPROM.get(0,curConfig);                                                 // читаем блок конфигурации из EEPROM
@@ -435,8 +400,7 @@ bool ReadEEPROMConfig (){
   return (tmp_CRC==curConfig.simple_crc16);                                // возвращаем сошлась ли CRC16 
 }
 
-void CheckAndUpdateEEPROM() {
-// проверяем конфигурацию и в случае необходимости - записываем новую 
+void CheckAndUpdateEEPROM() { // проверяем конфигурацию и в случае необходимости - записываем новую
   GlobalParams  oldConfig;        // это старый сохраненный конфиг
   uint16_t cur_CRC, old_CRC;      // это переменные для рассчета CRC сохраненного и текущего конфига
 
@@ -463,17 +427,53 @@ void CheckAndUpdateEEPROM() {
 #endif      
 }
 
+int CalcBrightnessByAmbient(int _Ambient) { // рассчитываем уровень яркости подсветки по внешнему датчику
+
+int ret_PWM = curConfig._min_auto_pwm;
+  // нормализуем входные значения от датчика подсветки
+  if (_Ambient < curConfig._min_ambient_value) _Ambient = curConfig._min_ambient_value;
+  if (_Ambient > curConfig._max_ambient_value) _Ambient = curConfig._max_ambient_value;
+  v_CurrAmbient = _Ambient;  
+  // собственно расчитываем значение PWM от датчика
+  ret_PWM = map(_Ambient, curConfig._min_ambient_value, curConfig._max_ambient_value, curConfig._min_auto_pwm, curConfig._max_auto_pwm);
+  // значения по умолчанию являются наиболее широкими параметрами, поэтому для безопасности - вгоняем возвращаемое значение в эти пределы
+  // т.е. нормализуем выходное значение PWM
+  if (ret_PWM > DEF_MAX_AUTO_PWM) ret_PWM = DEF_MAX_AUTO_PWM;
+  if (ret_PWM < DEF_MIN_AUTO_PWM) ret_PWM = DEF_MIN_AUTO_PWM;
+  return ret_PWM;
+}
+
+void SetGoalBrightness() { // устанавливаем целевую яркость подсветки по текущему состоянию
+const uint16_t oldGoalBrightness = v_GoalBrightness;
+
+  switch (curConfig.vu_light_mode) {   // "off"|"on_low"|"on_middle"|"on_high"|"auto"
+    case 0:          // режим выключенной подсветки "off"
+      v_GoalBrightness = 0;                                       
+      break;
+    case 1:          // режим минимальной ручной подсветки "on_low"
+      v_GoalBrightness = curConfig._min_manual_pwm;                                       
+      break;
+    case 2:          // режим минимальной ручной подсветки "on_middle"
+      v_GoalBrightness = curConfig._mid_manual_pwm;                                       
+      break;
+    case 3:          // режим минимальной ручной подсветки "on_low"
+      v_GoalBrightness = curConfig._max_manual_pwm;                                       
+      break;
+    case 4:          // переключились в автоматический режим
+      v_GoalBrightness = CalcBrightnessByAmbient(v_CurrAmbient);                        // настраиваем по текущей яркости датчика
+      break;
+  }
+  if (!s_AmpPowerOn) v_GoalBrightness = 0;                                              // если усилитель выключен - целевая яркость = 0 
+  f_HasDataForSync = f_HasDataForSync or (v_GoalBrightness != oldGoalBrightness);       // сохраняем или взводим флаг необходимости синхронизации - если значение поменялось     
+}
+
 // ========================= вспомогательные задачи времени выполнения ===================================
 
-void wifiTask(void *pvParam) {
-  // задача установления и поддержания WiFi соединения    
+void wifiTask(void *pvParam) { // задача установления и поддержания WiFi соединения
   uint32_t  StartWiFiCycle = 0;                                       // стартовый момент цикла в обработчике WiFi
   uint32_t  StartMQTTCycle = 0;                                       // стартовый момент цикла подключения к MQTT
-  char      AP_SSID[32] = "HiAmp_";                                   // переменная в которой строим строку с именем WiFi AP 
   uint8_t   APClientCount   = 0;                                      // количество подключенных клиентов в режиме AP
-
-  WiFi.macAddress().toCharArray(&AP_SSID[6],sizeof(AP_SSID)-6);       // строим имя сети для AP на основе MAC адреса ESP32
-  WiFi.hostname(AP_SSID);
+  WiFi.hostname(ControllerName);
   s_CurrentWIFIMode = WF_UNKNOWN;
   while (true) {    
     switch (s_CurrentWIFIMode) {
@@ -587,9 +587,9 @@ void wifiTask(void *pvParam) {
       WiFi.mode(WIFI_AP);
       WiFi.disconnect();      
       #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
-      Serial.printf("Create AP with SSID: %s\n", AP_SSID);
+      Serial.printf("Create AP with SSID: %s\n", ControllerName);
       #endif    
-      if (WiFi.softAP(AP_SSID,NULL,def_WiFi_Channel)) {     // собственно создаем точку доступа на дефолтном канале
+      if (WiFi.softAP(ControllerName,"",def_WiFi_Channel)) {     // собственно создаем точку доступа на дефолтном канале 
         #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
         Serial.print("AP created with IP: ");
         Serial.println(WiFi.softAPIP());
@@ -604,7 +604,7 @@ void wifiTask(void *pvParam) {
           if (APClientCount!=WiFi.softAPgetStationNum()) {
             APClientCount = WiFi.softAPgetStationNum();
             #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
-            Serial.printf("К точке доступа [%s] подключено: %d клиентов \n", AP_SSID,APClientCount);            
+            Serial.printf("К точке доступа [%s] подключено: %d клиентов \n", ControllerName,APClientCount);            
             #endif 
           }
           vTaskDelay(pdMS_TO_TICKS(500));                   // отдаем управление и ждем 0.5 секунды перед следующей проверкой
@@ -620,8 +620,7 @@ void wifiTask(void *pvParam) {
   }  
 }
 
-void oneWireTask(void *pvParam) {
-// задача по поддержанию работы через шину OneWire BUS
+void oneWireTask(void *pvParam) { // задача по поддержанию работы через шину OneWire BUS
 uint16_t tmp_RecieveCRC = 0;                                                          // переменная для расчёта CRC полученного пакета
 
   while (true) {
@@ -650,137 +649,88 @@ uint16_t tmp_RecieveCRC = 0;                                                    
   }
 }
 
-void handleRootPage() {
-// процедура генерации основной страницы сервера  
+void handleRootPage() { // процедура генерации основной страницы сервера
+  String tmpStr; 
   String out_http_text = R"=====(
 <!DOCTYPE html>
-<html>
-<head>
-<meta charset = "utf-8">
-<meta name='viewport' content='width=device-width, initial-scale=1.0'/>
-<title>DIY HiAmp configuration page</title>
-<style type="text/css">
-.button {
-  background-color: #4CAF50; /* Green */
-  border: none;
-  color: white;
-  border-radius: 6px;
-  padding: 12px 24px;
-  text-align: center;
-  text-decoration: none;
-  display: inline-block;
-  font-size: 15px;
-}
-.button:hover, .button:visited {
-  font-weight: bold; 
-  color: black;
-}
-</style>
-</head>
-
-<body style="background-color: #cccccc; Color: blue; ">
-<center>
-<div>
-<h1>WI-Fi LED CONTROL</h1>
-  <button class="button" onclick="send(1)">LED ON</button>
-  <button class="button" onclick="send(0)">LED OFF</button><BR>
-</div>
- <br>
-<div><h2>
-  LED State: <span id="state"></span>
-</h2>
-<BR>
-<h3>Send data: <br>
-<input type="text" length=10 id="valdat"/>
-<button type="button" onclick="sendData()">send</button>
-</h3>
-<BR>
-<h3>READ data: <br>
-<span style="display: inline-block; width: 200px; height: 20px; border: 1px solid black; background-color: white; color: black;" id="readdat"></span><br><br>
-
-</h3>
-</div>
-<script>
-
-function loadDoc()
-{
-  var xhttp = new XMLHttpRequest();
-  xhttp.onreadystatechange = function() {
-    if (this.readyState == 4 && this.status == 200) {
-      document.getElementById("state").innerHTML = this.responseText;
-    }
-  };
-  xhttp.open("GET", "getdata?state="+0, true);
-  xhttp.send();
-}
-
-function send(led_sts) 
-{
-  var xhttp = new XMLHttpRequest();
-  xhttp.onreadystatechange = function() {
-    if (this.readyState == 4 && this.status == 200) {
-      document.getElementById("state").innerHTML = this.responseText;
-    }
-  };
-  xhttp.open("GET", "setdata?state="+led_sts, true);
-  xhttp.send();
-}
-
-function sendData() 
-{
-  var xhttp = new XMLHttpRequest();
-  document.getElementById("valdat")
-  xhttp.onreadystatechange = function() {
-    if (this.readyState == 4 && this.status == 200) {
-      document.getElementById("valdat").innerHTML = this.responseText;
-          }
-  };
-  xhttp.open("GET", "setdata?value=" + document.getElementById("valdat").value, true);
-  xhttp.send();
-}
-setInterval(function() 
-{
-  getData();
-}, 1000); 
-
-function getData() {
-  var xhttp = new XMLHttpRequest();
-  xhttp.onreadystatechange = function() {
-    if (this.readyState == 4 && this.status == 200) {
-      document.getElementById("readdat").innerHTML =
-      this.responseText;
-    }
-  };
-  xhttp.open("GET", "getdata", true);
-  xhttp.send();
-}
-
-loadDoc();
-
-</script>
-</center>
-</body>
-</html>
-)=====";
+<html lang="en" class="">
+  <head>
+    <meta charset="utf-8"> <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+    <title>)=====";
+out_http_text += ControllerName +
+     R"=====( config</title><script> var x=null,lt,to,tp,pc='';
+		  function eb(s){return document.getElementById(s);}
+	    function qs(s){return document.querySelector(s);}
+	    function sp(i){eb(i).type=(eb(i).type==='text'?'password':'text');}
+	    function wl(f){window.addEventListener('load',f);}
+	    function jd(){var t=0,i=document.querySelectorAll('input,button,textarea,select'); 
+       while(i.length>=t){ if(i[t]){i[t]['name']=(i[t].hasAttribute('id')&&(!i[t].hasAttribute('name')))?i[t]['id']:i[t]['name'];}
+		   t++;}} wl(jd); </script>
+    <style> div,fieldset,input,select{padding:5px;font-size:1em;} fieldset{background:#4f4f4f;} p{margin:0.5em 0;}
+      input{width:100%;box-sizing:border-box;-webkit-box-sizing:border-box;-moz-box-sizing:border-box;background:#dddddd;color:#000000;}
+      input[type=checkbox], input[type=radio]{width:1em;margin-right:6px;vertical-align:-1px;} input[type=range]{width:99%;} select{width:100%;background:#dddddd;color:#000000;}
+      textarea{resize:vertical;width:98%;height:318px;padding:5px;overflow:auto;background:#1f1f1f;color:#65c115;} body{text-align:center;font-family:verdana,sans-serif;background:#252525;}
+      td{padding:0px;} button{border:0;border-radius:0.3rem;background:#1fa3ec;color:#faffff;line-height:2.4rem;font-size:1.2rem;width:100%;-webkit-transition-duration:0.4s;transition-duration:0.4s;cursor:pointer;}
+      button:hover{background:#0e70a4;} .bred{background:#d43535;}.bred:hover{background:#931f1f;}.bgrn{background:#47c266;}.bgrn:hover{background:#5aaf6f;} a{color:#1fa3ec;text-decoration:none;}
+      .p{float:left;text-align:left;}.q{float:right;text-align:right;}.r{border-radius:0.3em;padding:2px;margin:6px 2px;}
+    </style></head>
+  <body> <div style="text-align:left;display:inline-block;color:#eaeaff;min-width:340px;"> <div style="text-align:center;color:#eaeaea;"> <noscript>To use this page, please enable JavaScript<br></noscript>
+	    <h3>Amplifier control module configuration</h3><h2>)=====";
+out_http_text += ControllerName +
+     R"=====(</h2></div><fieldset><legend><b>&nbsp;Network parameters&nbsp;</b></legend><form method="get" action="setdata"><p><b>WiFi SSID</b> [)=====";
+tmpStr = String(curConfig.wifi_ssid);
+out_http_text += tmpStr +
+     R"=====(]<br><input id="sn" placeholder=" " value=")=====";
+out_http_text += tmpStr +
+     R"=====(" name="sn"></p><p><b>WiFi password</b><input type="checkbox" onclick="sp(&quot;wp&quot;)" name=""><br>
+     <input id="wp" type="password" placeholder="Password" value="****" name="wp"></p><p><b>IP for MQTT host</b> [)=====";
+tmpStr = IPAddress(curConfig.mqtt_host[0],curConfig.mqtt_host[1],curConfig.mqtt_host[2],curConfig.mqtt_host[3]).toString();
+out_http_text += tmpStr + R"=====(]<br><input id="mh" placeholder=" " value=")=====";
+out_http_text += tmpStr + R"=====(" name="mh"></p><p><b>Port</b> [)=====";
+tmpStr = String(curConfig.mqtt_port);
+out_http_text += tmpStr + R"=====(]<br><input id="ms" placeholder=")=====";
+out_http_text += tmpStr + R"=====(" value=")=====";
+out_http_text += tmpStr + R"=====(" name="ms"></p><p><b>MQTT User</b> [)=====";
+tmpStr = String(curConfig.mqtt_usr);
+out_http_text += tmpStr + R"=====(]<br><input id="mu" placeholder="MQTT_USER" value=")=====";
+out_http_text += tmpStr + R"=====(" name="mu"></p><p><b>MQTT user password</b><input type="checkbox" onclick="sp(&quot;mp&quot;)" name=""><br>
+		  <input id="mp" type="password" placeholder="Password" value="****" name="mp"></p><p><b>Set topic</b> [)=====";
+tmpStr = String(curConfig.command_topic);
+out_http_text += tmpStr + R"=====(]<br><input id="ts" placeholder=")=====";
+out_http_text += tmpStr + R"=====(" value=")=====";
+out_http_text += tmpStr + R"=====(" name="ts"></p><p><b>State topic</b> [)=====";
+tmpStr = String(curConfig.report_topic);
+out_http_text += tmpStr + R"=====(]<br><input id="tr" placeholder=")=====";
+out_http_text += tmpStr + R"=====(" value=")=====";
+out_http_text += tmpStr + R"=====(" name="tr"></p><p><b>Misc topic</b> [)=====";
+tmpStr = String(curConfig.misc_topic);
+out_http_text += tmpStr + R"=====(]<br><input id="tm" placeholder=")=====";
+out_http_text += tmpStr + R"=====(" value=")=====";
+out_http_text += tmpStr + R"=====(" name="tm"></p><p><b>LWT topic</b> [)=====";
+tmpStr = String(curConfig.lwt_topic);
+out_http_text += tmpStr + R"=====(]<br><input id="tl" placeholder=")=====";
+out_http_text += tmpStr + R"=====(" value=")=====";
+out_http_text += tmpStr + R"=====(" name="tl"></p><br><button name="save" type="submit" class="button bgrn">Save</button></form>
+	    </fieldset><div></div><p></p><form action="" method="get"><button name="">Reload current</button></form><p></p><p></p><form action="reset" method="get">
+	    <button name="">Reset</button></form><p></p><div style="text-align:right;font-size:11px;"><hr><a style="color:#aaa;">Dr.Cosha 2014 (based on design by Theo Arends)</a></div></div></body></html>)=====";
   WEB_Server.send ( 200, "text/html", out_http_text );
 }
 
-void handleNotFoundPage() {
-// процедура генерации страницы сервера c 404-й ошибкой
+void handleNotFoundPage() { // процедура генерации страницы сервера c 404-й ошибкой
   String out_http_text = "<body>!!! 404 !!!</body>";
   Serial.println("<<<Page not found!");    
   WEB_Server.send ( 404, "text/html", out_http_text );
 }
 
-void handleSetDataPage() {
-// процедура передачи данных в контроллер со страницы клиента
+void handleSetDataPage() { // процедура передачи данных в контроллер со страницы клиента
   String Str1 = WEB_Server.arg("value");
   String Str2 = WEB_Server.arg("state");
   Serial.print("<<<Set data value: ");  Serial.print(Str1); Serial.print(" state:");  Serial.println(Str2);  
+  handleRootPage(); 
+//  WEB_Server.send(200, "text/plane", "");
 }
 
-void handleGetDataPage() {
-// процедура чтения данных из контроллера и передачи их на страницу клиента
+void handleGetDataPage() { // процедура чтения данных из контроллера и передачи их на страницу клиента
   String out_http_text = "";
   Serial.println(">>>Get data");
   if (s_AmpPowerOn) out_http_text = "ON";
@@ -788,8 +738,7 @@ void handleGetDataPage() {
   WEB_Server.send(200, "text/plane", out_http_text);
 }
 
-void webServerTask(void *pvParam) {
-// задача по обслуживанию WEB сервера модуля
+void webServerTask(void *pvParam) { // задача по обслуживанию WEB сервера модуля
 // присваиваем ресурсы (страницы) нашему WEB серверу - страницы объявлены заранее и являются статическими
   WEB_Server.on("/", handleRootPage);		                              // добавляем корневую страницу
   WEB_Server.on("/setdata",handleSetDataPage);                        // страница, на котрую передаются данные для новой конфигурации
@@ -813,17 +762,14 @@ void webServerTask(void *pvParam) {
   }
 }
 
-
 // ------------------------ команды, которые обрабатываются в рамках получения событий ---------------------
 
-void cmdReset() {
-// команда сброса конфигурации до состояния по умолчанию и перезагрузка
+void cmdReset() { // команда сброса конфигурации до состояния по умолчанию и перезагрузка
   if (mqttClient.connected()) mqttClient.publish(curConfig.lwt_topic, 0, true, jv_OFFLINE);  // публикуем в топик LWT_TOPIC событие об отключении
   ESP.restart();                                                                             // перезагружаемся  
 }
 
-void cmdClearConfig_Reset() {
-// команда сброса конфигурации до состояния по умолчанию и перезагрузка
+void cmdClearConfig_Reset() { // команда сброса конфигурации до состояния по умолчанию и перезагрузка
   if (s_EnableEEPROM) { // если EEPROM разрешен и есть             
       SetConfigByDefault();                                                                  // в конфигурацию записываем значения по умолчанию
       curConfig.simple_crc16 = GetCrc16Simple((uint8_t*)&curConfig, sizeof(curConfig)-4);    // считаем CRC16 для конфигурации
@@ -833,7 +779,8 @@ void cmdClearConfig_Reset() {
   cmdReset();                                                                                // перезагружаемся  
 }
 
-void cmdSwitchInput(const bool InpMode) { // команда переключения входов усилителя  
+void cmdSwitchInput(const bool InpMode) { // команда переключения входов усилителя
+
   #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
   Serial.printf("Try switch from %s to %s\n", curConfig.inp_selector ? jv_XLR : jv_RCA, InpMode ? jv_XLR : jv_RCA);
   #endif      
@@ -847,16 +794,14 @@ void cmdSwitchInput(const bool InpMode) { // команда переключен
   }
 }
 
-void cmdEnableTrigger(const bool _Mode) { 
-// разрешение/запрещение работы триггеров
+void cmdEnableTrigger(const bool _Mode) { // разрешение/запрещение работы триггеров
   if (curConfig.enable_triggers != _Mode) {
     curConfig.enable_triggers = _Mode;
     f_HasReportNow = true; 
   }
 }
 
-void cmdEnableOWBSync(const bool _Mode) { 
-// разрешение синхронизации по OneWireBUS
+void cmdEnableOWBSync(const bool _Mode) { // разрешение синхронизации по OneWireBUS
   if (curConfig.sync_by_owb != _Mode) {
     curConfig.sync_by_owb = _Mode;
     f_HasReportNow = true;   
@@ -864,16 +809,14 @@ void cmdEnableOWBSync(const bool _Mode) {
   }
 }
 
-void cmdTriggerByPass(const bool _Mode) { 
-// разрешение сквозной синхронизации триггеров
+void cmdTriggerByPass(const bool _Mode) { // разрешение сквозной синхронизации триггеров
   if (curConfig.sync_trigger_in_out != _Mode) {
     curConfig.sync_trigger_in_out = _Mode;
     f_HasReportNow = true;   
   }
 }
 
-void cmdChangeVULightMode(const char * _Mode) {
-// переключаем режим освещения в нужный режим     
+void cmdChangeVULightMode(const char * _Mode) { // переключаем режим освещения в нужный режим
  for (uint8_t i = 0; i < MAX_VU_MODE; i++) {    // перебираем строки пока не найдем нашу
    if (strcmp(VU_mode_str[i],_Mode) == 0) {     // если строку нашли
       curConfig.vu_light_mode = i;              // устанавливаем правильный режим
@@ -886,8 +829,7 @@ void cmdChangeVULightMode(const char * _Mode) {
  }
 }
 
-void cmdChangeManualPWMSet(uint16_t _min, uint16_t _mid, uint16_t _max) {
-// функция изменения параметров яркости ручного режима
+void cmdChangeManualPWMSet(uint16_t _min, uint16_t _mid, uint16_t _max) { // функция изменения параметров яркости ручного режима
   #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
   Serial.printf("Set manual PWM to [%u,%u,%u] \n",_min,_mid,_max);
   #endif   
@@ -898,8 +840,7 @@ void cmdChangeManualPWMSet(uint16_t _min, uint16_t _mid, uint16_t _max) {
   SetGoalBrightness();                          // расчитываем новое значение для текущей яркости
 }
 
-void cmdChangeAutoPWMSet(uint16_t _min, uint16_t _max) {
-// функция изменения параметров яркости автоматического режима  
+void cmdChangeAutoPWMSet(uint16_t _min, uint16_t _max) { // функция изменения параметров яркости автоматического режима
   #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
   Serial.printf("Set borders for auto PWM to [%u,%u] \n",_min,_max);
   #endif   
@@ -909,8 +850,7 @@ void cmdChangeAutoPWMSet(uint16_t _min, uint16_t _max) {
   SetGoalBrightness();                          // расчитываем новое значение для текущей яркости
 }
 
-void cmdChangeSensorMapSet(uint16_t _min, uint16_t _max) {
-// вызываем функцию изменения параметров мапировки сенсора
+void cmdChangeSensorMapSet(uint16_t _min, uint16_t _max) { // вызываем функцию изменения параметров мапировки сенсора
   #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
   Serial.printf("Set range for sensor to [%u,%u] \n",_min,_max);
   #endif   
@@ -920,8 +860,7 @@ void cmdChangeSensorMapSet(uint16_t _min, uint16_t _max) {
   SetGoalBrightness();                          // расчитываем новое значение для текущей яркости
 }
 
-void cmdPowerON() {
-// команда включения усилителя
+void cmdPowerON() { // команда включения усилителя
   #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
   Serial.printf("Switch power from %s to ON\n",s_AmpPowerOn ? jv_ON : jv_OFF);
   #endif  
@@ -937,8 +876,7 @@ void cmdPowerON() {
   }
 }
 
-void cmdPowerOFF() {
-// команда сброса конфигурации до состояния по умолчанию и перезагрузка
+void cmdPowerOFF() { // команда выключения усилителя
   #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
   Serial.printf("Switch power from %s to OFF\n",s_AmpPowerOn ? jv_ON : jv_OFF);
   #endif    
@@ -957,8 +895,7 @@ void cmdPowerOFF() {
 
 // ================================== основные задачи времени выполнения =================================
 
-void eventHandlerTask (void *pvParam) {
-// задача обработки событий получения команды от датчика, таймера, MQTT, OneWire, кнопок
+void eventHandlerTask (void *pvParam) { // задача обработки событий получения команды от датчика, таймера, MQTT, OneWire, кнопок
 
   while (true) {
     //-------------------- обработка команд задержки и таймера ---------------------------------------
@@ -1164,8 +1101,7 @@ void eventHandlerTask (void *pvParam) {
   }
 }
 
-void applayChangesTask (void *pvParam) {
-// применяем изменения состояния, и если нужно сохранение состояния в FLASH памяти
+void applayChangesTask (void *pvParam) { // применяем изменения состояния
 // здесь отражаются внутренние изменения, команды выполняются в процедуре обработки команд eventHandlerTask
   while (true) {
     // в начале исполняем обработку изменений без учёта флага f_HasChanges
@@ -1247,8 +1183,7 @@ void applayChangesTask (void *pvParam) {
   }
 }
 
-void sendCommandTask (void *pvParam) {
-// шлем команду по OneWireBUS
+void sendCommandTask (void *pvParam) { // шлем команду по OneWireBUS
   while (true) {
     if (curConfig.sync_by_owb and f_HasDataForSync) {                                 // если есть данные для синхронизации и она разрешена
         // готовим данные для передачи
@@ -1282,20 +1217,34 @@ void sendCommandTask (void *pvParam) {
   }
 }
 
-void reportTask (void *pvParam) {
-// репортим о текущем состоянии в MQTT и если отладка то и в Serial
+void reportTask (void *pvParam) { // репортим о текущем состоянии в MQTT и если отладка то и в Serial
   while (true) {
     if (((millis()-tm_LastReportToMQTT)>cur_MQTT_REPORT_DELAY) || f_HasReportNow) {  // если наступило время отчёта или взведен флаг "отчёта сейчас"
       digitalWrite(LED_POWER_BLUE_PIN, HIGH);                                                       // включение через подачу 1
       if (s_AmpPowerOn) cur_MQTT_REPORT_DELAY = C_MQTT_REPORT_DELAY_ON;                             // при генерации отчёта делаем коррекцию на включение усилителя
         else cur_MQTT_REPORT_DELAY = C_MQTT_REPORT_DELAY_OFF;
       if (mqttClient.connected()) {  // если есть связь с MQTT - репорт в топик
+        // ---------------------------------------------------------------------------------
+        // 1. В начале рапортуем в главный топик статуса [curConfig.report_topic]
         // чистим документ
         OutputJSONdoc.clear(); 
         // добавляем поля в документ
         OutputJSONdoc[jk_POWER] = s_AmpPowerOn ? jv_ON : jv_OFF;                                    // ключ общего включения
         OutputJSONdoc[jk_SELECTOR] = curConfig.inp_selector ? jv_XLR : jv_RCA;                      // режим входа RCA / XLR
         OutputJSONdoc[jk_LIGHT_MODE] = VU_mode_str[curConfig.vu_light_mode];                        // режим подсветки VU индикатора
+        // серилизуем в строку
+        String tmpPayload;
+        serializeJson(OutputJSONdoc, tmpPayload);
+        // публикуем в топик P_STATE_TOPIC серилизованный json через буфер buffer
+        char buffer1[ tmpPayload.length()+1 ];
+        tmpPayload.toCharArray(buffer1, sizeof(buffer1));   
+        mqttClient.publish(curConfig.report_topic, 0, true, buffer1 );
+        // ----------------------------------------------------------------------------------
+        // 2. Затем пишем состояние в вспомогательный топик [curConfig.misc_topic]
+        // чистим документ
+        OutputJSONdoc.clear(); 
+        tmpPayload = "";
+        // добавляем поля в документ
         OutputJSONdoc[jk_BRIGHTNESS] = v_GoalBrightness;                                            // значение целевой яркости подсветки
         OutputJSONdoc[jk_AMBIENT] = v_CurrAmbient;                                                  // значение датчика освещенности
         OutputJSONdoc[jk_TRIGGER_IN] = f_TriggerIn ? jv_ON : jv_OFF;                                // состояние входа триггера
@@ -1314,12 +1263,11 @@ void reportTask (void *pvParam) {
         OutputJSONdoc[jk_AMBIENT_SET][0] = curConfig._min_ambient_value;                     
         OutputJSONdoc[jk_AMBIENT_SET][1] = curConfig._max_ambient_value;                     
         // серилизуем в строку
-        String tmpPayload;
         serializeJson(OutputJSONdoc, tmpPayload);
         // публикуем в топик P_STATE_TOPIC серилизованный json через буфер buffer
-        char buffer[ tmpPayload.length()+1 ];
-        tmpPayload.toCharArray(buffer, sizeof(buffer));   
-        mqttClient.publish(P_STATE_TOPIC, 0, true, buffer );
+        char buffer2[ tmpPayload.length()+1 ];
+        tmpPayload.toCharArray(buffer2, sizeof(buffer2));   
+        mqttClient.publish(curConfig.misc_topic, 0, true, buffer2 );
       }
       #ifdef DEBUG_LEVEL_PORT 
         Serial.println();
@@ -1348,8 +1296,7 @@ void reportTask (void *pvParam) {
 }
 
 // -------------------------- в этом фрагменте описываем call-back функции MQTT клиента --------------------------------------------
-void onMqttConnect(bool sessionPresent) {   
-  // обработчик подключения к MQTT
+void onMqttConnect(bool sessionPresent) { // обработчик подключения к MQTT
   #ifdef DEBUG_LEVEL_PORT                                    
     Serial.println("Connected to MQTT.");  //  "Подключились по MQTT."
   #endif                
@@ -1365,38 +1312,32 @@ void onMqttConnect(bool sessionPresent) {
   #endif                     
 }
 
-void onMqttDisconnect(AsyncMqttClientDisconnectReason reason) {
-  // обработчик отключения от MQTT  
+void onMqttDisconnect(AsyncMqttClientDisconnectReason reason) { // обработчик отключения от MQTT
   #ifdef DEBUG_LEVEL_PORT                                                                           
     Serial.println("Disconnected from MQTT.");                      // если отключились от MQTT
   #endif         
   s_CurrentWIFIMode = WF_UNKNOWN;                                   // переходим в режим полного реконнекта по WiFi
 }
 
-void onMqttSubscribe(uint16_t packetId, uint8_t qos) {
-  // обработка подтверждения подписки на топик
+void onMqttSubscribe(uint16_t packetId, uint8_t qos) { // обработка подтверждения подписки на топик
   #ifdef DEBUG_LEVEL_PORT   
     Serial.printf("Subscribe acknowledged. \n  packetId: %d\n  qos: %d\n", packetId, qos);  
   #endif         
 }
 
-void onMqttUnsubscribe(uint16_t packetId) {
-  // обработка подтверждения отписки от топика  
+void onMqttUnsubscribe(uint16_t packetId) { // обработка подтверждения отписки от топика
   #ifdef DEBUG_LEVEL_PORT     
     Serial.printf("Unsubscribe acknowledged.\n  packetId: %d\n", packetId); 
   #endif                     
 }
 
-void onMqttPublish(uint16_t packetId) {
-  // обработка подтверждения публикации
+void onMqttPublish(uint16_t packetId) { // обработка подтверждения публикации
   #ifdef DEBUG_LEVEL_PORT     
     Serial.printf("Publish acknowledged.\n  packetId: %d\n", packetId);   
   #endif                     
 }
 
-
-// в этой функции обрабатываем события получения данных в управляющем топике SET_TOPIC
-void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties properties, size_t len, size_t index, size_t total) {
+void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties properties, size_t len, size_t index, size_t total) { // в этой функции обрабатываем события получения данных в управляющем топике SET_TOPIC
   String messageTemp;
   
   for (int i = 0; i < len; i++) {                       // преобразуем полученные в сообщении данные в строку при этом выкидываем символы кавычек
@@ -1435,8 +1376,9 @@ void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties 
 // =================================== инициализация контроллера и программных модулей ======================================
 // начальная инициализация программы - выполняется при подаче дежурного питания.
 // дальнейшее включение усилителя - уже в рамках работающей программы
-void setup() {
+void setup() { // инициализация контроллера и программных модулей
 uint8_t MacAddress[8];                        // временная переменная для MAC адреса текущей ESP
+String  Mac_Postfix;                          // строка для создания постфикса имени из MAC
 
 #ifdef DEBUG_LEVEL_PORT                       // вывод в порт при отладке кода
   // инициализируем порт отладки 
@@ -1476,9 +1418,18 @@ uint8_t MacAddress[8];                        // временная переме
   v_CurrBrightness = v_GoalBrightness;              // инициализируем значение текущей яркости
 
   // инициализация генератора случайных чисел MAC адресом
-  if (esp_efuse_mac_get_default(MacAddress) == ESP_OK) randomSeed(MacAddress[5]);
-    else randomSeed(millis());
-
+  // и генерация уникального имени контроллера из его MAC-а 
+  if (esp_efuse_mac_get_default(MacAddress) == ESP_OK) {
+    Mac_Postfix = String(MacAddress[4], HEX) + String(MacAddress[5], HEX);
+    Mac_Postfix.toUpperCase();
+    randomSeed(MacAddress[5]);
+    }
+  else {
+    Mac_Postfix = "0000";
+    randomSeed(millis());
+  }
+  // имя нашего контроллера из префикса и постфикса
+  ControllerName += Mac_Postfix;
   // создаем и инициализируем PWM канал, отключаем его, назначаем  VU выход в канал PWM
   ledcSetup(c_PWM_Channel, c_Freq, c_Resolution);  
   //в начале выключаем генерацию PWM для канала
@@ -1556,6 +1507,7 @@ uint8_t MacAddress[8];                        // временная переме
     Serial.println("---");    
     Serial.printf("  COMMAND topic: %s\n", curConfig.command_topic);
     Serial.printf("  REPORT topic: %s\n", curConfig.report_topic);
+    Serial.printf("  MISC topic: %s\n", curConfig.misc_topic);
     Serial.printf("  LWT topic: %s\n", curConfig.lwt_topic);
     Serial.println("---");    
     Serial.printf("  CRC by read: %04X\n",curConfig.simple_crc16);
@@ -1602,7 +1554,6 @@ uint8_t MacAddress[8];                        // временная переме
 
 }
 
-// не используемый основной цикл
-void loop() {
+void loop() { // не используемый основной цикл
   vTaskDelete(NULL);   // удаляем не нужную задачу loop()  
 }
