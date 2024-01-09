@@ -3,7 +3,7 @@
 ************************************************************************
 *             Firmware для управления моноблоком Hi-END Amp
 *                         (с) 2023-2024, by Dr@Cosha
-*                               ver 4.0
+*                               ver 4.1b
 *                         hardware ver.6.0
 ************************************************************************
 
@@ -15,6 +15,7 @@
 - вход TruggerIN - сигнал +12V на включение/выключение от прочих устройств
 - шина OneWireBUS - подключение к общей шине управления для приема/передачи команд по OneWire
 - сервер MQTT - подключение к топикам сервера для возврата статуса и получения команд
+- WEB страница доступная по адресу подключения модуля
 
 Моноблок усилителя раблотает в комплексе с аналогичными, поэтому общается с ними следующим образом:
 
@@ -72,6 +73,8 @@ extern "C" {
 
 #include <AsyncMqttClient.h>
 #include <ArduinoJson.h>
+
+#include "webPageConst.h"                         // сюда вынесены все константные строки для генерации WEB страниц
 
 // устанавливаем режим отладки
 #define DEBUG_LEVEL_PORT                          // устанавливаем режим отладки через порт
@@ -220,10 +223,10 @@ struct GlobalParams {
   bool            enable_triggers;                // разрешено управление через триггера
   bool            sync_by_owb;                    // синхронизация по OneWireBus
 // параметры подключения к MQTT и WiFi  
-  char            wifi_ssid[20];                  // строка SSID сети WiFi
-  char            wifi_pwd[20];                   // пароль к WiFi сети
-  char            mqtt_usr[20];                   // имя пользователя MQTT сервера
-  char            mqtt_pwd[20];                   // пароль к MQTT серверу
+  char            wifi_ssid[40];                  // строка SSID сети WiFi
+  char            wifi_pwd[40];                   // пароль к WiFi сети
+  char            mqtt_usr[40];                   // имя пользователя MQTT сервера
+  char            mqtt_pwd[40];                   // пароль к MQTT серверу
   uint8_t         mqtt_host[4];                   // адрес сервера MQTT
   uint16_t        mqtt_port;                      // порт подключения к MQTT серверу
 // параметры очередей MQTT
@@ -467,7 +470,447 @@ const uint16_t oldGoalBrightness = v_GoalBrightness;
   f_HasDataForSync = f_HasDataForSync or (v_GoalBrightness != oldGoalBrightness);       // сохраняем или взводим флаг необходимости синхронизации - если значение поменялось     
 }
 
-// ========================= вспомогательные задачи времени выполнения ===================================
+// ------------------------ команды, которые обрабатываются в рамках получения событий ---------------------
+
+void cmdReset() { // команда сброса конфигурации до состояния по умолчанию и перезагрузка
+  if (mqttClient.connected()) mqttClient.publish(curConfig.lwt_topic, 0, true, jv_OFFLINE);  // публикуем в топик LWT_TOPIC событие об отключении
+  ESP.restart();                                                                             // перезагружаемся  
+}
+
+void cmdClearConfig_Reset() { // команда сброса конфигурации до состояния по умолчанию и перезагрузка
+  if (s_EnableEEPROM) { // если EEPROM разрешен и есть             
+      SetConfigByDefault();                                                                  // в конфигурацию записываем значения по умолчанию
+      curConfig.simple_crc16 = GetCrc16Simple((uint8_t*)&curConfig, sizeof(curConfig)-4);    // считаем CRC16 для конфигурации
+      EEPROM.put(0,curConfig);                                                               // записываем конфигурацию
+      EEPROM.commit();                                                                       // подтверждаем изменения
+    }  
+  cmdReset();                                                                                // перезагружаемся  
+}
+
+void cmdSwitchInput(const bool InpMode) { // команда переключения входов усилителя
+
+  #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+  Serial.printf("Try switch from %s to %s\n", curConfig.inp_selector ? jv_XLR : jv_RCA, InpMode ? jv_XLR : jv_RCA);
+  #endif      
+  if (InpMode != curConfig.inp_selector) {                                                   // проверяем, что необходимо переключить вход
+    f_HasChanges = true;                                                                     // взводим флаг изменения
+    f_HasReportNow = true;                                                                   // взводим флаг отчёта об изменении состояния
+    f_HasDataForSync = true;                                                                 // взводим флаг необходимости синхронизации
+    curConfig.inp_selector = InpMode;                                                        // собственно переключаем вход
+    if (curConfig.inp_selector) digitalWrite(RELAY_SELECTOR_PIN, LOW);                       // подключаем вход RCA    
+      else digitalWrite(RELAY_SELECTOR_PIN, HIGH);                                           // подключаем вход XLR    
+  }
+}
+
+void cmdEnableTrigger(const bool _Mode) { // разрешение/запрещение работы триггеров
+  if (curConfig.enable_triggers != _Mode) {
+    curConfig.enable_triggers = _Mode;
+    f_HasReportNow = true; 
+  }
+}
+
+void cmdEnableOWBSync(const bool _Mode) { // разрешение синхронизации по OneWireBUS
+  if (curConfig.sync_by_owb != _Mode) {
+    curConfig.sync_by_owb = _Mode;
+    f_HasReportNow = true;   
+    f_HasDataForSync = curConfig.sync_by_owb;                                               // взводим флаг необходимости синхронизации    
+  }
+}
+
+void cmdTriggerByPass(const bool _Mode) { // разрешение сквозной синхронизации триггеров
+  if (curConfig.sync_trigger_in_out != _Mode) {
+    curConfig.sync_trigger_in_out = _Mode;
+    f_HasReportNow = true;   
+  }
+}
+
+void cmdChangeVULightMode(const char * _Mode) { // переключаем режим освещения в нужный режим
+ for (uint8_t i = 0; i < MAX_VU_MODE; i++) {    // перебираем строки пока не найдем нашу
+   if (strcmp(VU_mode_str[i],_Mode) == 0) {     // если строку нашли
+      curConfig.vu_light_mode = i;              // устанавливаем правильный режим
+      f_HasReportNow = true;                    // отчитываемся об этом
+      f_HasChanges = true;                      // устанавливаем флаг наличия изменений
+      SetGoalBrightness();                      // расчитываем новое значение для текущей яркости
+      f_HasDataForSync = true;                  // взводим флаг необходимости синхронизации 
+      break;  
+    } 
+ }
+}
+
+void cmdChangeManualPWMSet(uint16_t _min, uint16_t _mid, uint16_t _max) { // функция изменения параметров яркости ручного режима
+  #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+  Serial.printf("Set manual PWM to [%u,%u,%u] \n",_min,_mid,_max);
+  #endif   
+  curConfig._min_manual_pwm = _min;
+  curConfig._mid_manual_pwm = _mid;
+  curConfig._max_manual_pwm = _max;
+  f_HasChanges = true; 
+  SetGoalBrightness();                          // расчитываем новое значение для текущей яркости
+}
+
+void cmdChangeAutoPWMSet(uint16_t _min, uint16_t _max) { // функция изменения параметров яркости автоматического режима
+  #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+  Serial.printf("Set borders for auto PWM to [%u,%u] \n",_min,_max);
+  #endif   
+  curConfig._min_auto_pwm = _min;
+  curConfig._max_auto_pwm = _max;
+  f_HasChanges = true; 
+  SetGoalBrightness();                          // расчитываем новое значение для текущей яркости
+}
+
+void cmdChangeSensorMapSet(uint16_t _min, uint16_t _max) { // вызываем функцию изменения параметров мапировки сенсора
+  #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+  Serial.printf("Set range for sensor to [%u,%u] \n",_min,_max);
+  #endif   
+  curConfig._min_ambient_value = _min;
+  curConfig._max_ambient_value = _max;
+  f_HasChanges = true; 
+  SetGoalBrightness();                          // расчитываем новое значение для текущей яркости
+}
+
+void cmdPowerON() { // команда включения усилителя
+  #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+  Serial.printf("Switch power from %s to ON\n",s_AmpPowerOn ? jv_ON : jv_OFF);
+  #endif  
+  if (!s_AmpPowerOn) { // если усилитель еще не включен 
+    s_AmpPowerOn = true;                                 // отмечаем текущее состояние  
+    digitalWrite(RELAY_POWER_PIN, HIGH);                 // включаем основной силовой блок питания
+    tm_TogglePower = millis();                           // запоминаем момент включения основного питания 
+    s_VU_Enable = false;                                 // запрещаем работу стрелочного указателя на период переходных процессов    
+    SetGoalBrightness();                                 // расчитываем новое значение для текущей яркости
+    f_HasChanges = true;
+    f_HasReportNow = true;
+    f_HasDataForSync = true;                             // взводим флаг необходимости синхронизации          
+  }
+}
+
+void cmdPowerOFF() { // команда выключения усилителя
+  #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+  Serial.printf("Switch power from %s to OFF\n",s_AmpPowerOn ? jv_ON : jv_OFF);
+  #endif    
+  if (s_AmpPowerOn) { // если усилитель еще не выключен 
+    s_AmpPowerOn = false;                                // отмечаем текущее состояние  
+    CheckAndUpdateEEPROM();                              // запоминаем текущую конфигурацию  
+    digitalWrite(RELAY_POWER_PIN, LOW);                  // выключаем основной силовой блок питания  
+    tm_TogglePower = millis();                           // запоминаем момент выключения основного питания 
+    s_VU_Enable = false;                                 // запрещаем работу стрелочного указателя на период переходных процессов    
+    f_HasChanges = true;  
+    f_HasReportNow = true;  
+    SetGoalBrightness();                                 // расчитываем новое значение для текущей яркости = 0       
+    f_HasDataForSync = true;                             // взводим флаг необходимости синхронизации              
+  }
+}
+
+// ------------------------- обработка событий по генерации страниц WEB сервера -------------------------------
+
+void handleRootPage() { // процедура генерации основной страницы сервера
+  String tmpStr; 
+  String out_http_text = CSW_PAGE_TITLE;
+  out_http_text += ControllerName +
+ R"=====( config</title><script> var x=null,lt,to,tp,pc='';function eb(s){return document.getElementById(s);}function qs(s){return document.querySelector(s);}
+ function sp(i){eb(i).type=(eb(i).type==='text'?'password':'text');}function wl(f){window.addEventListener('load',f);}function jd(){var t=0,i=document.querySelectorAll('input,button,textarea,select'); 
+ while(i.length>=t){ if(i[t]){i[t]['name']=(i[t].hasAttribute('id')&&(!i[t].hasAttribute('name')))?i[t]['id']:i[t]['name'];}t++;}} wl(jd); </script>)=====" + CSW_PAGE_STYLE +
+ R"=====( </head><body> <div style="text-align:left;display:inline-block;color:#eaeaff;min-width:340px;"> <div style="text-align:center;color:#eaeaea;"> <noscript>To use this page, please enable JavaScript<br></noscript>
+ <h3>Amplifier control module configuration</h3><h2>)=====";
+  out_http_text += ControllerName +
+ R"=====(</h2></div><fieldset><legend><b>&nbsp;Network parameters&nbsp;</b></legend>
+ <form method="get" action="applay"><p><b>WiFi SSID</b> [)=====";
+  tmpStr = String(curConfig.wifi_ssid);
+  out_http_text += tmpStr +
+ R"=====(]<br><input id="wn" placeholder=" " value=")=====";
+  out_http_text += tmpStr +
+ R"=====(" name="wn"></p><p><b>WiFi password</b><input type="checkbox" onclick="sp(&quot;wp&quot;)" name=""><br>
+ <input id="wp" type="password" placeholder="Password" value="****" name="wp"></p><p><b>IP for MQTT host</b> [)=====";
+  tmpStr = IPAddress(curConfig.mqtt_host[0],curConfig.mqtt_host[1],curConfig.mqtt_host[2],curConfig.mqtt_host[3]).toString();
+  out_http_text += tmpStr + R"=====(]<br><input id="mh" placeholder=" " value=")=====";
+  out_http_text += tmpStr + R"=====(" name="mh"></p><p><b>Port</b> [)=====";
+  tmpStr = String(curConfig.mqtt_port);
+  out_http_text += tmpStr + R"=====(]<br><input id="ms" placeholder=")=====";
+  out_http_text += tmpStr + R"=====(" value=")=====";
+  out_http_text += tmpStr + R"=====(" name="ms"></p><p><b>MQTT User</b> [)=====";
+  tmpStr = String(curConfig.mqtt_usr);
+  out_http_text += tmpStr + R"=====(]<br><input id="mu" placeholder="MQTT_USER" value=")=====";
+  out_http_text += tmpStr + R"=====(" name="mu"></p><p><b>MQTT user password</b><input type="checkbox" onclick="sp(&quot;mp&quot;)" name=""><br>
+ <input id="mp" type="password" placeholder="Password" value="****" name="mp"></p><p><b>Set topic</b> [)=====";
+  tmpStr = String(curConfig.command_topic);
+  out_http_text += tmpStr + R"=====(]<br><input id="ts" placeholder=")=====";
+  out_http_text += tmpStr + R"=====(" value=")=====";
+  out_http_text += tmpStr + R"=====(" name="ts"></p><p><b>State topic</b> [)=====";
+  tmpStr = String(curConfig.report_topic);
+  out_http_text += tmpStr + R"=====(]<br><input id="tr" placeholder=")=====";
+  out_http_text += tmpStr + R"=====(" value=")=====";
+  out_http_text += tmpStr + R"=====(" name="tr"></p><p><b>Misc topic</b> [)=====";
+  tmpStr = String(curConfig.misc_topic);
+  out_http_text += tmpStr + R"=====(]<br><input id="tm" placeholder=")=====";
+  out_http_text += tmpStr + R"=====(" value=")=====";
+  out_http_text += tmpStr + R"=====(" name="tm"></p><p><b>LWT topic</b> [)=====";
+  tmpStr = String(curConfig.lwt_topic);
+  out_http_text += tmpStr + R"=====(]<br><input id="tl" placeholder=")=====";
+  out_http_text += tmpStr + R"=====(" value=")=====";
+  out_http_text += tmpStr + R"=====(" name="tl"></p><br><button name="save" type="submit" class="button bgrn">Save</button></form></fieldset> 
+ <div></div><p></p><form action="" method="get"><button name="">Reload current</button><div></div></form><hr><form action="reboot" method="get"><div></div>
+ <button name="">Reset</button>)=====" + CSW_PAGE_FOOTER;
+  #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+  Serial.println("WEB >>> Root page");    
+  #endif  
+  WEB_Server.send ( 200, "text/html", out_http_text );
+  f_Has_WEB_Server_Connect = true;                                            // взводим флаг наличия изменений
+
+/*  <meta http-equiv="refresh" content="0;URL=????"/>  */
+}
+
+void handleRebootPage() { // процедура обработки страницы c ожидания
+  String message_str = " Please wait for restart...";
+  String out_http_text = CSW_PAGE_TITLE;  
+  out_http_text += ControllerName + " reboot</title>" + CSW_PAGE_STYLE +
+ R"=====(<script>setInterval(function(){getData();},1000);function getData() {var xhttp = new XMLHttpRequest(); xhttp.onreadystatechange=function() {if (this.readyState == 4 && this.status == 200) {
+ if (this.responseText=="alive"){window.location='/';}}};xhttp.open("GET","alive",true);xhttp.send();}</script>	
+ </head><body><div style='text-align:left;display:inline-block;color:#eaeaea;min-width:340px;'><div style="text-align:center;color:#eaeaea;"><h3>Amplifier control module configuration</h3><h2>)=====";
+  out_http_text += ControllerName + R"=====(</h2><br><noscript>To use this page, please enable JavaScript<br></noscript><br><div><a id="blink">)=====";
+  if (f_ApplayChanges) out_http_text += "Changes applied." + message_str; 
+    else out_http_text += "Reset and reboot." + message_str; 
+  out_http_text += R"=====(</a></div><br><div></div><p><form action='/' method='get'><button>Configuration</button>)=====" + CSW_PAGE_FOOTER;
+  #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+  Serial.println("WEB >>> Reboot page");    
+  #endif  
+  f_ApplayChanges = false;
+  WEB_Server.send(200, "text/html", out_http_text);
+  vTaskDelay(pdMS_TO_TICKS(500));                                   // делаем задержку перед перезагрузкой чтобы сервер успел отправить страницы
+  cmdReset();
+} 
+
+void handleNotFoundPage() { // процедура генерации страницы сервера c 404-й ошибкой
+  String out_http_text = CSW_PAGE_TITLE;
+  out_http_text += ControllerName +" - Page not found</title>" + CSW_PAGE_STYLE;
+  out_http_text += R"=====(</head><body><div style='text-align:left;display:inline-block;color:#eaeaea;min-width:340px;'>
+ <div style="text-align:center;color:#eaeaea;"><h3>Amplifier control module configuration</h3><h2>)=====";
+  out_http_text += ControllerName + R"=====(</h2><div><a id="blink" style="font-size:2em" > 404! Page not found...</a>
+ </div><br><div></div><p><form action='/' method='get'><button>Return</button>)=====" + CSW_PAGE_FOOTER;
+   #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+  Serial.println("WEB >>> Page not found. Error 404!...");    
+  #endif  
+  WEB_Server.send ( 404, "text/html", out_http_text );
+}
+
+void handleApplayPage() { // обработка страницы с приемом данных в контроллер со страницы клиента
+  String ArgName  = "";
+  String ArgValue = "";
+  IPAddress _IP = P_MQTT_HOST;
+  uint16_t _Int = 0;
+  if (WEB_Server.args() > 0) {                                                  // если параметры переданы - то занимаемся их обработкой  
+    for (size_t i = 0; i < WEB_Server.args(); i++) {                            // идем по списку переданных на страницу значений и обрабатываем их 
+      ArgName = WEB_Server.argName(i);                                          // имя текущего параметра        
+      ArgValue = WEB_Server.arg(i);                                             // значение текущего параметра  
+      ArgValue.trim();                                                          // чистим от пробелов     
+      // Аргумент [wn] >> SSID WiFi сети
+      if (ArgName.equals("wn") and !ArgValue.isEmpty()) {                       // валидно не пустое значение
+        strcpy(curConfig.wifi_ssid, ArgValue.c_str());                          // присваиваем новый SSID сети
+        #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+        Serial.printf("Argument [%s] >> curConfig.wifi_ssid = [%s]\n",ArgName, curConfig.wifi_ssid);
+        #endif  
+      }
+      // Аргумент [wp] >> пароль для WiFi сети
+      if (ArgName.equals("wp") and !ArgValue.equals("****")) {                  // проверяем на то, что в поле есть актуальное значение отличное от [****] 
+        strcpy(curConfig.wifi_pwd, ArgValue.c_str());                           // присваиваем новый пароль сети
+        #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+        Serial.printf("Argument [%s] >> curConfig.wifi_pwd = [%s]\n",ArgName, curConfig.wifi_pwd);
+        #endif  
+      }
+      // Аргумент [mh] >> IP для доступа к MQTT серверу
+      if (ArgName.equals("mh") and !ArgValue.isEmpty()) {                       // далее следует проверка на валидность адреса 
+        if (_IP.fromString(ArgValue)) {                                         // если значение конвертится, то присваиваем новое значение 
+          curConfig.mqtt_host[0] = _IP[0];                                      // сохраняем адрес в конфигурацию
+          curConfig.mqtt_host[1] = _IP[1];
+          curConfig.mqtt_host[2] = _IP[2];
+          curConfig.mqtt_host[3] = _IP[3];   
+          #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+          Serial.printf("Argument [%s] >> curConfig.mqtt_host = [%u.%u.%u.%u]\n",ArgName,curConfig.mqtt_host[0],curConfig.mqtt_host[1],curConfig.mqtt_host[2],curConfig.mqtt_host[3]);           
+          #endif  
+          }
+        else {
+          #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+          Serial.printf("Error in argument [%s]. Value [%s] non convertable to IP.\n",ArgName,ArgValue);  
+          #endif  
+        } 
+      }  
+      // Аргумент [ms] >> порт для доступа к MQTT
+      if (ArgName.equals("ms") and !ArgValue.isEmpty()) {                       // проверяем на то, что в поле есть актуальное значение от 1..0xFFFF
+        _Int = ArgValue.toInt();
+        if (_Int>1 and _Int < 0xFFFF) {                                         // если это валидное значение порта, то присваиваем конфигурации
+          curConfig.mqtt_port = _Int;                           
+          #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+          Serial.printf("Argument [%s] >> curConfig.mqtt_port = [%u]\n",ArgName, curConfig.mqtt_port);
+          #endif  
+        }
+      }
+      // Аргумент [mu] >> MQTT user
+      if (ArgName.equals("mu") and !ArgValue.isEmpty()) {                       // валидно не пустое значение
+        strcpy(curConfig.mqtt_usr, ArgValue.c_str());                           // присваиваем новое имя MQTT пользователя
+        #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+        Serial.printf("Argument [%s] >> curConfig.mqtt_usr = [%s]\n",ArgName, curConfig.mqtt_usr);
+        #endif  
+      }
+      // Аргумент [mp] >> пароль для MQTT сервера
+      if (ArgName.equals("mp") and !ArgValue.equals("****")) {                  // проверяем на то, что в поле есть актуальное значение отличное от [****] 
+        strcpy(curConfig.mqtt_pwd, ArgValue.c_str());                           // присваиваем новый пароль MQTT пользователю
+        #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+        Serial.printf("Argument [%s] >> curConfig.mqtt_pwd = [%s]\n",ArgName, curConfig.mqtt_pwd);
+        #endif  
+      }
+      // Аргумент [ts] >> MQTT топик для приема команд
+      if (ArgName.equals("ts") and !ArgValue.isEmpty()) {                       // проверяем на то, что в поле есть актуальное значение от 1..0xFFFF      
+        if (ArgValue.endsWith("/")) ArgValue.remove(ArgValue.length()-1,1);     // если есть обратная косая черта - удаляем
+        strcpy(curConfig.command_topic, ArgValue.c_str());                      // присваиваем значение переменной 
+        #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+        Serial.printf("Argument [%s] >> curConfig.command_topic = [%s]\n",ArgName, curConfig.command_topic);
+        #endif  
+      }
+      // Аргумент [tr] >> MQTT топик для основного отчета
+      if (ArgName.equals("tr") and !ArgValue.isEmpty()) {                       // проверяем на то, что в поле есть актуальное значение
+        if (ArgValue.endsWith("/")) ArgValue.remove(ArgValue.length()-1,1);     // если есть обратная косая черта - удаляем
+        strcpy(curConfig.report_topic, ArgValue.c_str());                       // присваиваем значение переменной 
+        #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+        Serial.printf("Argument [%s] >> curConfig.report_topic = [%s]\n",ArgName, curConfig.report_topic);
+        #endif  
+      }
+      // Аргумент [tm] >> MQTT топик для отчета о вспомогательных параметрах
+      if (ArgName.equals("tm") and !ArgValue.isEmpty()) {                       // проверяем на то, что в поле есть актуальное значение     
+        if (ArgValue.endsWith("/")) ArgValue.remove(ArgValue.length()-1,1);     // если есть обратная косая черта - удаляем
+        strcpy(curConfig.misc_topic, ArgValue.c_str());                         // присваиваем значение переменной 
+        #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+        Serial.printf("Argument [%s] >> curConfig.misc_topic = [%s]\n",ArgName, curConfig.misc_topic);
+        #endif  
+      }
+      // Аргумент [tl] >> MQTT топик для LWT
+      if (ArgName.equals("tl") and !ArgValue.isEmpty()) {                       // проверяем на то, что в поле есть актуальное значение     
+        if (ArgValue.endsWith("/")) ArgValue.remove(ArgValue.length()-1,1);     // если есть обратная косая черта - удаляем
+        strcpy(curConfig.lwt_topic, ArgValue.c_str());                          // присваиваем значение переменной 
+        #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+        Serial.printf("Argument [%s] >> curConfig.lwt_topic = [%s]\n",ArgName, curConfig.lwt_topic);
+        #endif  
+      }
+    }  
+    CheckAndUpdateEEPROM();                                     // проверяем конфигурацию и в случае необходимости - записываем новую
+    f_ApplayChanges = true;                                     // взводим флаг изменений для правильного вывода сообщения на странице перезагрузки
+  }
+  #ifdef DEBUG_LEVEL_PORT                                       // вывод в порт при отладке кода 
+  Serial.println("WEB <<< Get and applay changes...");    
+  #endif  
+  handleRebootPage();                                           // отражаем страницу перезагрузки и перегружаем устройство
+}
+
+void handleCheckAlivePage() { // процедура проверки статуса контроллера и возврат данных на страницу ожидания (reboot и applay)
+  #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
+  Serial.println("WEB >>> Send alive status");
+  #endif
+  WEB_Server.send(200, "text/plane", "alive");
+}
+
+// -------------------------- описание call-back функции MQTT клиента ------------------------------------
+
+void onMqttConnect(bool sessionPresent) { // обработчик подключения к MQTT
+  #ifdef DEBUG_LEVEL_PORT                                    
+    Serial.println("Connected to MQTT.");  //  "Подключились по MQTT."
+  #endif                
+  // далее подписываем ESP32 на набор необходимых для управления топиков:
+  uint16_t packetIdSub = mqttClient.subscribe(curConfig.command_topic, 0);  // подписываем ESP32 на топик SET_TOPIC
+  #ifdef DEBUG_LEVEL_PORT                                      
+    Serial.printf("Subscribing at QoS 0, packetId: %d on topic :[%s]\n", packetIdSub, curConfig.command_topic);
+  #endif                  
+  // сразу публикуем событие о своей активности
+  mqttClient.publish(curConfig.lwt_topic, 0, true, jv_ONLINE);           // публикуем в топик LWT_TOPIC событие о своей жизнеспособности
+  #ifdef DEBUG_LEVEL_PORT                                      
+    Serial.printf("Publishing LWT state in [%s]. QoS 0. ", curConfig.lwt_topic); 
+  #endif                     
+}
+
+void onMqttDisconnect(AsyncMqttClientDisconnectReason reason) { // обработчик отключения от MQTT
+  #ifdef DEBUG_LEVEL_PORT                                                                           
+    Serial.println("Disconnected from MQTT.");                      // если отключились от MQTT
+  #endif         
+  s_CurrentWIFIMode = WF_UNKNOWN;                                   // переходим в режим полного реконнекта по WiFi
+}
+
+void onMqttSubscribe(uint16_t packetId, uint8_t qos) { // обработка подтверждения подписки на топик
+  #ifdef DEBUG_LEVEL_PORT   
+    Serial.printf("Subscribe acknowledged. \n  packetId: %d\n  qos: %d\n", packetId, qos);  
+  #endif         
+}
+
+void onMqttUnsubscribe(uint16_t packetId) { // обработка подтверждения отписки от топика
+  #ifdef DEBUG_LEVEL_PORT     
+    Serial.printf("Unsubscribe acknowledged.\n  packetId: %d\n", packetId); 
+  #endif                     
+}
+
+void onMqttPublish(uint16_t packetId) { // обработка подтверждения публикации
+  #ifdef DEBUG_LEVEL_PORT     
+    Serial.printf("Publish acknowledged.\n  packetId: %d\n", packetId);   
+  #endif                     
+}
+
+void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties properties, size_t len, size_t index, size_t total) { // в этой функции обрабатываем события получения данных в управляющем топике SET_TOPIC
+  String messageTemp;
+  
+  for (int i = 0; i < len; i++) {                       // преобразуем полученные в сообщении данные в строку при этом выкидываем символы кавычек
+      messageTemp += (char)payload[i];
+  }
+  messageTemp[len] = '\0';  
+  // проверяем, что мы получили MQTT сообщение в командном топике
+  if (strcmp(topic, curConfig.command_topic) == 0) {
+    // разбираем MQTT сообщение и подготавливаем буфер с изменениями для формирования команд    
+    // для этого получаем семафор обработки входного JSON документа
+    while ( xSemaphoreTake(sem_InputJSONdoc,(TickType_t) 10) != pdTRUE ) {
+      vTaskDelay(1/portTICK_PERIOD_MS);         
+    }
+    DeserializationError err = deserializeJson(InputJSONdoc, messageTemp);                    // десерилизуем сообщение и взводим признак готовности к обработке
+    if (err) {
+      #ifdef DEBUG_LEVEL_PORT         
+      Serial.print(F("Error of deserializeJson(): "));
+      Serial.println(err.c_str());
+      #endif
+      }
+    else {  
+      // для коротких сообщений без ключей дополняем DOC объект
+      if (strstr(payload,jc_CLR_CONFIG) != NULL ) InputJSONdoc[jc_CLR_CONFIG] = true;
+      if (strstr(payload,jc_RESET) != NULL ) InputJSONdoc[jc_RESET] = true;
+      if (strstr(payload,jc_REPORT) != NULL ) InputJSONdoc[jc_REPORT] = true;
+      f_HasMQTTCommand = true;                            // взводим флаг получения команды по MQTT
+      // отдадим семафор обработки документа только после преобразования JSON документа в команды
+    }
+  }
+  #ifdef DEBUG_LEVEL_PORT         
+  Serial.printf("Publish received.\n  topic: %s\n  message: [", topic);
+  Serial.print(messageTemp); Serial.println("]");
+  #endif
+}
+
+// ========================= коммуникационные задачи времени выполнения ==================================
+
+void webServerTask(void *pvParam) { // задача по обслуживанию WEB сервера модуля
+// присваиваем ресурсы (страницы) нашему WEB серверу - страницы объявлены заранее и являются статическими
+  WEB_Server.on("/", handleRootPage);		                              // корневая страница с конфигурацией
+  WEB_Server.on("/applay",handleApplayPage);                          // страница, применения изменений - на котрую передаются данные для новой конфигурации
+  WEB_Server.on("/reboot",handleRebootPage);                          // страница автоматической перезагрузки контроллера 
+  WEB_Server.on("/alive",handleCheckAlivePage);                       // страница для проверки стстуса контроллера и перенаправления на основную страницу
+  WEB_Server.onNotFound(handleNotFoundPage);		                      // страница с 404-й ошибкой   
+  bool _FirstTime = true;
+  while (true) {
+    if (f_WEB_Server_Enable) {  // если разрешена работа WEB сервера
+    // если мы отдали страницу клиенту, и timeout по ее обработке не наступил, то f_Has_WEB_Server_Connect = true; 
+      if (_FirstTime ) {
+          WEB_Server.begin();                                               // регистрируем сервер 
+          _FirstTime = false;
+      }    
+      WEB_Server.handleClient();
+      } 
+    else {
+      _FirstTime = true;
+      WEB_Server.close();  
+    }
+    vTaskDelay(1/portTICK_PERIOD_MS);                              // делаем задержку в чтении следующего цикла
+  }
+}
 
 void wifiTask(void *pvParam) { // задача установления и поддержания WiFi соединения
   uint32_t  StartWiFiCycle = 0;                                       // стартовый момент цикла в обработчике WiFi
@@ -646,250 +1089,6 @@ uint16_t tmp_RecieveCRC = 0;                                                    
     }  
     else xSemaphoreGive( sem_InputOWBPacket );    // если данных нет - так же снимаем семафор        
     vTaskDelay(pdMS_TO_TICKS(C_OWB_READ_BUS_DELAY));                // делаем задержку в чтении следующего цикла
-  }
-}
-
-void handleRootPage() { // процедура генерации основной страницы сервера
-  String tmpStr; 
-  String out_http_text = R"=====(
-<!DOCTYPE html>
-<html lang="en" class="">
-  <head>
-    <meta charset="utf-8"> <meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
-    <title>)=====";
-out_http_text += ControllerName +
-     R"=====( config</title><script> var x=null,lt,to,tp,pc='';
-		  function eb(s){return document.getElementById(s);}
-	    function qs(s){return document.querySelector(s);}
-	    function sp(i){eb(i).type=(eb(i).type==='text'?'password':'text');}
-	    function wl(f){window.addEventListener('load',f);}
-	    function jd(){var t=0,i=document.querySelectorAll('input,button,textarea,select'); 
-       while(i.length>=t){ if(i[t]){i[t]['name']=(i[t].hasAttribute('id')&&(!i[t].hasAttribute('name')))?i[t]['id']:i[t]['name'];}
-		   t++;}} wl(jd); </script>
-    <style> div,fieldset,input,select{padding:5px;font-size:1em;} fieldset{background:#4f4f4f;} p{margin:0.5em 0;}
-      input{width:100%;box-sizing:border-box;-webkit-box-sizing:border-box;-moz-box-sizing:border-box;background:#dddddd;color:#000000;}
-      input[type=checkbox], input[type=radio]{width:1em;margin-right:6px;vertical-align:-1px;} input[type=range]{width:99%;} select{width:100%;background:#dddddd;color:#000000;}
-      textarea{resize:vertical;width:98%;height:318px;padding:5px;overflow:auto;background:#1f1f1f;color:#65c115;} body{text-align:center;font-family:verdana,sans-serif;background:#252525;}
-      td{padding:0px;} button{border:0;border-radius:0.3rem;background:#1fa3ec;color:#faffff;line-height:2.4rem;font-size:1.2rem;width:100%;-webkit-transition-duration:0.4s;transition-duration:0.4s;cursor:pointer;}
-      button:hover{background:#0e70a4;} .bred{background:#d43535;}.bred:hover{background:#931f1f;}.bgrn{background:#47c266;}.bgrn:hover{background:#5aaf6f;} a{color:#1fa3ec;text-decoration:none;}
-      .p{float:left;text-align:left;}.q{float:right;text-align:right;}.r{border-radius:0.3em;padding:2px;margin:6px 2px;}
-    </style></head>
-  <body> <div style="text-align:left;display:inline-block;color:#eaeaff;min-width:340px;"> <div style="text-align:center;color:#eaeaea;"> <noscript>To use this page, please enable JavaScript<br></noscript>
-	    <h3>Amplifier control module configuration</h3><h2>)=====";
-out_http_text += ControllerName +
-     R"=====(</h2></div><fieldset><legend><b>&nbsp;Network parameters&nbsp;</b></legend><form method="get" action="setdata"><p><b>WiFi SSID</b> [)=====";
-tmpStr = String(curConfig.wifi_ssid);
-out_http_text += tmpStr +
-     R"=====(]<br><input id="sn" placeholder=" " value=")=====";
-out_http_text += tmpStr +
-     R"=====(" name="sn"></p><p><b>WiFi password</b><input type="checkbox" onclick="sp(&quot;wp&quot;)" name=""><br>
-     <input id="wp" type="password" placeholder="Password" value="****" name="wp"></p><p><b>IP for MQTT host</b> [)=====";
-tmpStr = IPAddress(curConfig.mqtt_host[0],curConfig.mqtt_host[1],curConfig.mqtt_host[2],curConfig.mqtt_host[3]).toString();
-out_http_text += tmpStr + R"=====(]<br><input id="mh" placeholder=" " value=")=====";
-out_http_text += tmpStr + R"=====(" name="mh"></p><p><b>Port</b> [)=====";
-tmpStr = String(curConfig.mqtt_port);
-out_http_text += tmpStr + R"=====(]<br><input id="ms" placeholder=")=====";
-out_http_text += tmpStr + R"=====(" value=")=====";
-out_http_text += tmpStr + R"=====(" name="ms"></p><p><b>MQTT User</b> [)=====";
-tmpStr = String(curConfig.mqtt_usr);
-out_http_text += tmpStr + R"=====(]<br><input id="mu" placeholder="MQTT_USER" value=")=====";
-out_http_text += tmpStr + R"=====(" name="mu"></p><p><b>MQTT user password</b><input type="checkbox" onclick="sp(&quot;mp&quot;)" name=""><br>
-		  <input id="mp" type="password" placeholder="Password" value="****" name="mp"></p><p><b>Set topic</b> [)=====";
-tmpStr = String(curConfig.command_topic);
-out_http_text += tmpStr + R"=====(]<br><input id="ts" placeholder=")=====";
-out_http_text += tmpStr + R"=====(" value=")=====";
-out_http_text += tmpStr + R"=====(" name="ts"></p><p><b>State topic</b> [)=====";
-tmpStr = String(curConfig.report_topic);
-out_http_text += tmpStr + R"=====(]<br><input id="tr" placeholder=")=====";
-out_http_text += tmpStr + R"=====(" value=")=====";
-out_http_text += tmpStr + R"=====(" name="tr"></p><p><b>Misc topic</b> [)=====";
-tmpStr = String(curConfig.misc_topic);
-out_http_text += tmpStr + R"=====(]<br><input id="tm" placeholder=")=====";
-out_http_text += tmpStr + R"=====(" value=")=====";
-out_http_text += tmpStr + R"=====(" name="tm"></p><p><b>LWT topic</b> [)=====";
-tmpStr = String(curConfig.lwt_topic);
-out_http_text += tmpStr + R"=====(]<br><input id="tl" placeholder=")=====";
-out_http_text += tmpStr + R"=====(" value=")=====";
-out_http_text += tmpStr + R"=====(" name="tl"></p><br><button name="save" type="submit" class="button bgrn">Save</button></form>
-	    </fieldset><div></div><p></p><form action="" method="get"><button name="">Reload current</button></form><p></p><p></p><form action="reset" method="get">
-	    <button name="">Reset</button></form><p></p><div style="text-align:right;font-size:11px;"><hr><a style="color:#aaa;">Dr.Cosha 2014 (based on design by Theo Arends)</a></div></div></body></html>)=====";
-  WEB_Server.send ( 200, "text/html", out_http_text );
-}
-
-void handleNotFoundPage() { // процедура генерации страницы сервера c 404-й ошибкой
-  String out_http_text = "<body>!!! 404 !!!</body>";
-  Serial.println("<<<Page not found!");    
-  WEB_Server.send ( 404, "text/html", out_http_text );
-}
-
-void handleSetDataPage() { // процедура передачи данных в контроллер со страницы клиента
-  String Str1 = WEB_Server.arg("value");
-  String Str2 = WEB_Server.arg("state");
-  Serial.print("<<<Set data value: ");  Serial.print(Str1); Serial.print(" state:");  Serial.println(Str2);  
-  handleRootPage(); 
-//  WEB_Server.send(200, "text/plane", "");
-}
-
-void handleGetDataPage() { // процедура чтения данных из контроллера и передачи их на страницу клиента
-  String out_http_text = "";
-  Serial.println(">>>Get data");
-  if (s_AmpPowerOn) out_http_text = "ON";
-    else out_http_text = "OFF";
-  WEB_Server.send(200, "text/plane", out_http_text);
-}
-
-void webServerTask(void *pvParam) { // задача по обслуживанию WEB сервера модуля
-// присваиваем ресурсы (страницы) нашему WEB серверу - страницы объявлены заранее и являются статическими
-  WEB_Server.on("/", handleRootPage);		                              // добавляем корневую страницу
-  WEB_Server.on("/setdata",handleSetDataPage);                        // страница, на котрую передаются данные для новой конфигурации
-  WEB_Server.on("/getdata",handleGetDataPage);                        // страница, c которой читаются данные из контроллера
-  WEB_Server.onNotFound(handleNotFoundPage);		                      // добавляем страницу с 404-й ошибкой   
-  bool _FirstTime = true;
-  while (true) {
-    if (f_WEB_Server_Enable) {  // если разрешена работа WEB сервера
-    // если мы отдали страницу клиенту, и timeout по ее обработке не наступил, то f_Has_WEB_Server_Connect = true; 
-      if (_FirstTime ) {
-          WEB_Server.begin();                                               // регистрируем сервер 
-          _FirstTime = false;
-      }    
-      WEB_Server.handleClient();
-      } 
-    else {
-      _FirstTime = true;
-      WEB_Server.close();  
-    }
-    vTaskDelay(1/portTICK_PERIOD_MS);                              // делаем задержку в чтении следующего цикла
-  }
-}
-
-// ------------------------ команды, которые обрабатываются в рамках получения событий ---------------------
-
-void cmdReset() { // команда сброса конфигурации до состояния по умолчанию и перезагрузка
-  if (mqttClient.connected()) mqttClient.publish(curConfig.lwt_topic, 0, true, jv_OFFLINE);  // публикуем в топик LWT_TOPIC событие об отключении
-  ESP.restart();                                                                             // перезагружаемся  
-}
-
-void cmdClearConfig_Reset() { // команда сброса конфигурации до состояния по умолчанию и перезагрузка
-  if (s_EnableEEPROM) { // если EEPROM разрешен и есть             
-      SetConfigByDefault();                                                                  // в конфигурацию записываем значения по умолчанию
-      curConfig.simple_crc16 = GetCrc16Simple((uint8_t*)&curConfig, sizeof(curConfig)-4);    // считаем CRC16 для конфигурации
-      EEPROM.put(0,curConfig);                                                               // записываем конфигурацию
-      EEPROM.commit();                                                                       // подтверждаем изменения
-    }  
-  cmdReset();                                                                                // перезагружаемся  
-}
-
-void cmdSwitchInput(const bool InpMode) { // команда переключения входов усилителя
-
-  #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
-  Serial.printf("Try switch from %s to %s\n", curConfig.inp_selector ? jv_XLR : jv_RCA, InpMode ? jv_XLR : jv_RCA);
-  #endif      
-  if (InpMode != curConfig.inp_selector) {                                                   // проверяем, что необходимо переключить вход
-    f_HasChanges = true;                                                                     // взводим флаг изменения
-    f_HasReportNow = true;                                                                   // взводим флаг отчёта об изменении состояния
-    f_HasDataForSync = true;                                                                 // взводим флаг необходимости синхронизации
-    curConfig.inp_selector = InpMode;                                                        // собственно переключаем вход
-    if (curConfig.inp_selector) digitalWrite(RELAY_SELECTOR_PIN, LOW);                       // подключаем вход RCA    
-      else digitalWrite(RELAY_SELECTOR_PIN, HIGH);                                           // подключаем вход XLR    
-  }
-}
-
-void cmdEnableTrigger(const bool _Mode) { // разрешение/запрещение работы триггеров
-  if (curConfig.enable_triggers != _Mode) {
-    curConfig.enable_triggers = _Mode;
-    f_HasReportNow = true; 
-  }
-}
-
-void cmdEnableOWBSync(const bool _Mode) { // разрешение синхронизации по OneWireBUS
-  if (curConfig.sync_by_owb != _Mode) {
-    curConfig.sync_by_owb = _Mode;
-    f_HasReportNow = true;   
-    f_HasDataForSync = curConfig.sync_by_owb;                                               // взводим флаг необходимости синхронизации    
-  }
-}
-
-void cmdTriggerByPass(const bool _Mode) { // разрешение сквозной синхронизации триггеров
-  if (curConfig.sync_trigger_in_out != _Mode) {
-    curConfig.sync_trigger_in_out = _Mode;
-    f_HasReportNow = true;   
-  }
-}
-
-void cmdChangeVULightMode(const char * _Mode) { // переключаем режим освещения в нужный режим
- for (uint8_t i = 0; i < MAX_VU_MODE; i++) {    // перебираем строки пока не найдем нашу
-   if (strcmp(VU_mode_str[i],_Mode) == 0) {     // если строку нашли
-      curConfig.vu_light_mode = i;              // устанавливаем правильный режим
-      f_HasReportNow = true;                    // отчитываемся об этом
-      f_HasChanges = true;                      // устанавливаем флаг наличия изменений
-      SetGoalBrightness();                      // расчитываем новое значение для текущей яркости
-      f_HasDataForSync = true;                  // взводим флаг необходимости синхронизации 
-      break;  
-    } 
- }
-}
-
-void cmdChangeManualPWMSet(uint16_t _min, uint16_t _mid, uint16_t _max) { // функция изменения параметров яркости ручного режима
-  #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
-  Serial.printf("Set manual PWM to [%u,%u,%u] \n",_min,_mid,_max);
-  #endif   
-  curConfig._min_manual_pwm = _min;
-  curConfig._mid_manual_pwm = _mid;
-  curConfig._max_manual_pwm = _max;
-  f_HasChanges = true; 
-  SetGoalBrightness();                          // расчитываем новое значение для текущей яркости
-}
-
-void cmdChangeAutoPWMSet(uint16_t _min, uint16_t _max) { // функция изменения параметров яркости автоматического режима
-  #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
-  Serial.printf("Set borders for auto PWM to [%u,%u] \n",_min,_max);
-  #endif   
-  curConfig._min_auto_pwm = _min;
-  curConfig._max_auto_pwm = _max;
-  f_HasChanges = true; 
-  SetGoalBrightness();                          // расчитываем новое значение для текущей яркости
-}
-
-void cmdChangeSensorMapSet(uint16_t _min, uint16_t _max) { // вызываем функцию изменения параметров мапировки сенсора
-  #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
-  Serial.printf("Set range for sensor to [%u,%u] \n",_min,_max);
-  #endif   
-  curConfig._min_ambient_value = _min;
-  curConfig._max_ambient_value = _max;
-  f_HasChanges = true; 
-  SetGoalBrightness();                          // расчитываем новое значение для текущей яркости
-}
-
-void cmdPowerON() { // команда включения усилителя
-  #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
-  Serial.printf("Switch power from %s to ON\n",s_AmpPowerOn ? jv_ON : jv_OFF);
-  #endif  
-  if (!s_AmpPowerOn) { // если усилитель еще не включен 
-    s_AmpPowerOn = true;                                 // отмечаем текущее состояние  
-    digitalWrite(RELAY_POWER_PIN, HIGH);                 // включаем основной силовой блок питания
-    tm_TogglePower = millis();                           // запоминаем момент включения основного питания 
-    s_VU_Enable = false;                                 // запрещаем работу стрелочного указателя на период переходных процессов    
-    SetGoalBrightness();                                 // расчитываем новое значение для текущей яркости
-    f_HasChanges = true;
-    f_HasReportNow = true;
-    f_HasDataForSync = true;                             // взводим флаг необходимости синхронизации          
-  }
-}
-
-void cmdPowerOFF() { // команда выключения усилителя
-  #ifdef DEBUG_LEVEL_PORT       // вывод в порт при отладке кода 
-  Serial.printf("Switch power from %s to OFF\n",s_AmpPowerOn ? jv_ON : jv_OFF);
-  #endif    
-  if (s_AmpPowerOn) { // если усилитель еще не выключен 
-    s_AmpPowerOn = false;                                // отмечаем текущее состояние  
-    CheckAndUpdateEEPROM();                              // запоминаем текущую конфигурацию  
-    digitalWrite(RELAY_POWER_PIN, LOW);                  // выключаем основной силовой блок питания  
-    tm_TogglePower = millis();                           // запоминаем момент выключения основного питания 
-    s_VU_Enable = false;                                 // запрещаем работу стрелочного указателя на период переходных процессов    
-    f_HasChanges = true;  
-    f_HasReportNow = true;  
-    SetGoalBrightness();                                 // расчитываем новое значение для текущей яркости = 0       
-    f_HasDataForSync = true;                             // взводим флаг необходимости синхронизации              
   }
 }
 
@@ -1293,84 +1492,6 @@ void reportTask (void *pvParam) { // репортим о текущем сост
     }
     vTaskDelay(1/portTICK_PERIOD_MS);         
   }
-}
-
-// -------------------------- в этом фрагменте описываем call-back функции MQTT клиента --------------------------------------------
-void onMqttConnect(bool sessionPresent) { // обработчик подключения к MQTT
-  #ifdef DEBUG_LEVEL_PORT                                    
-    Serial.println("Connected to MQTT.");  //  "Подключились по MQTT."
-  #endif                
-  // далее подписываем ESP32 на набор необходимых для управления топиков:
-  uint16_t packetIdSub = mqttClient.subscribe(curConfig.command_topic, 0);  // подписываем ESP32 на топик SET_TOPIC
-  #ifdef DEBUG_LEVEL_PORT                                      
-    Serial.printf("Subscribing at QoS 0, packetId: %d on topic :[%s]\n", packetIdSub, curConfig.command_topic);
-  #endif                  
-  // сразу публикуем событие о своей активности
-  mqttClient.publish(curConfig.lwt_topic, 0, true, jv_ONLINE);           // публикуем в топик LWT_TOPIC событие о своей жизнеспособности
-  #ifdef DEBUG_LEVEL_PORT                                      
-    Serial.printf("Publishing LWT state in [%s]. QoS 0. ", curConfig.lwt_topic); 
-  #endif                     
-}
-
-void onMqttDisconnect(AsyncMqttClientDisconnectReason reason) { // обработчик отключения от MQTT
-  #ifdef DEBUG_LEVEL_PORT                                                                           
-    Serial.println("Disconnected from MQTT.");                      // если отключились от MQTT
-  #endif         
-  s_CurrentWIFIMode = WF_UNKNOWN;                                   // переходим в режим полного реконнекта по WiFi
-}
-
-void onMqttSubscribe(uint16_t packetId, uint8_t qos) { // обработка подтверждения подписки на топик
-  #ifdef DEBUG_LEVEL_PORT   
-    Serial.printf("Subscribe acknowledged. \n  packetId: %d\n  qos: %d\n", packetId, qos);  
-  #endif         
-}
-
-void onMqttUnsubscribe(uint16_t packetId) { // обработка подтверждения отписки от топика
-  #ifdef DEBUG_LEVEL_PORT     
-    Serial.printf("Unsubscribe acknowledged.\n  packetId: %d\n", packetId); 
-  #endif                     
-}
-
-void onMqttPublish(uint16_t packetId) { // обработка подтверждения публикации
-  #ifdef DEBUG_LEVEL_PORT     
-    Serial.printf("Publish acknowledged.\n  packetId: %d\n", packetId);   
-  #endif                     
-}
-
-void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties properties, size_t len, size_t index, size_t total) { // в этой функции обрабатываем события получения данных в управляющем топике SET_TOPIC
-  String messageTemp;
-  
-  for (int i = 0; i < len; i++) {                       // преобразуем полученные в сообщении данные в строку при этом выкидываем символы кавычек
-      messageTemp += (char)payload[i];
-  }
-  messageTemp[len] = '\0';  
-  // проверяем, что мы получили MQTT сообщение в командном топике
-  if (strcmp(topic, curConfig.command_topic) == 0) {
-    // разбираем MQTT сообщение и подготавливаем буфер с изменениями для формирования команд    
-    // для этого получаем семафор обработки входного JSON документа
-    while ( xSemaphoreTake(sem_InputJSONdoc,(TickType_t) 10) != pdTRUE ) {
-      vTaskDelay(1/portTICK_PERIOD_MS);         
-    }
-    DeserializationError err = deserializeJson(InputJSONdoc, messageTemp);                    // десерилизуем сообщение и взводим признак готовности к обработке
-    if (err) {
-      #ifdef DEBUG_LEVEL_PORT         
-      Serial.print(F("Error of deserializeJson(): "));
-      Serial.println(err.c_str());
-      #endif
-      }
-    else {  
-      // для коротких сообщений без ключей дополняем DOC объект
-      if (strstr(payload,jc_CLR_CONFIG) != NULL ) InputJSONdoc[jc_CLR_CONFIG] = true;
-      if (strstr(payload,jc_RESET) != NULL ) InputJSONdoc[jc_RESET] = true;
-      if (strstr(payload,jc_REPORT) != NULL ) InputJSONdoc[jc_REPORT] = true;
-      f_HasMQTTCommand = true;                            // взводим флаг получения команды по MQTT
-      // отдадим семафор обработки документа только после преобразования JSON документа в команды
-    }
-  }
-  #ifdef DEBUG_LEVEL_PORT         
-  Serial.printf("Publish received.\n  topic: %s\n  message: [", topic);
-  Serial.print(messageTemp); Serial.println("]");
-  #endif
 }
 
 // =================================== инициализация контроллера и программных модулей ======================================
