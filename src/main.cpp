@@ -545,6 +545,7 @@ void cmdChangeManualPWMSet(uint16_t _min, uint16_t _mid, uint16_t _max) { // ф�
   curConfig._mid_manual_pwm = _mid;
   curConfig._max_manual_pwm = _max;
   f_HasChanges = true; 
+  f_HasReportNow = true;
   SetGoalBrightness();                          // расчитываем новое значение для текущей яркости
 }
 
@@ -555,6 +556,7 @@ void cmdChangeAutoPWMSet(uint16_t _min, uint16_t _max) { // функция из�
   curConfig._min_auto_pwm = _min;
   curConfig._max_auto_pwm = _max;
   f_HasChanges = true; 
+  f_HasReportNow = true;
   SetGoalBrightness();                          // расчитываем новое значение для текущей яркости
 }
 
@@ -565,6 +567,7 @@ void cmdChangeSensorMapSet(uint16_t _min, uint16_t _max) { // вызываем �
   curConfig._min_ambient_value = _min;
   curConfig._max_ambient_value = _max;
   f_HasChanges = true; 
+  f_HasReportNow = true;
   SetGoalBrightness();                          // расчитываем новое значение для текущей яркости
 }
 
