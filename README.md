@@ -1,8 +1,6 @@
 # Модуль управления оконечным усилителем
 ## (Amplifiler control unit)
 
-[![License](https://img.shields.io/github/license/Hieromon/AutoConnect)](https://github.com/Hieromon/AutoConnect/blob/master/LICENSE)
-
 Модуль управления оконечным усилителем с индикатором выходной мощности. 
 Управляющая программа с поддержкой межмодульных линков, и управлением через MQTT.
 
