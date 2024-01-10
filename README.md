@@ -99,7 +99,7 @@
   
   {"bypass":"on"|"off"}                                     - разрешение прямой проброски триггерного сигнала с входа на выход
   
-  {"light_manual": [<value1>,<value2>,<value3>]}            - значения PWM для подстройки яркости освещения в режимах "on_low","on_middle","on_high"
+  {"light_manual": [<value1>,<value2>,<value3>]}                  - значения PWM для подстройки яркости освещения в режимах "on_low","on_middle","on_high"
   
   {"light_auto": [<min_value>,<max_value>]}                 - значения PWM для подстройки границ изменения автоматической яркости
   
