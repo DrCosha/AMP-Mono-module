@@ -15,7 +15,7 @@
 - защита акустических систем от постоянного напряжения и перегрузки;
 - принудительное отключение стрелочного индикатора в моменты переходных процессов включения/выключения усилителя.
 
-<div align="center"><img alt="Overview" width="460" src="/images/3D_acu_pcb_view.png" />&emsp;&emsp;&emsp;<img alt="Captiveportal" width="182" src="docs/images/ov.gif" /></div>
+<div align="center"><img alt="Overview" width="460" src="/images/3D_acu_pcb_view.png" />&emsp;&emsp;&emsp;<img alt="Captiveportal" width="182" src="/images/amp_main_view.png" /></div>
 
 <img width="40%" src="/images/3D_acu_pcb_view.png">&emsp;
 
