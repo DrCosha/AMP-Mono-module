@@ -496,6 +496,7 @@ const uint16_t oldGoalBrightness = v_GoalBrightness;
 
 void cmdReset() { // команда сброса конфигурации до состояния по умолчанию и перезагрузка
   if (mqttClient.connected()) mqttClient.publish(curConfig.lwt_topic, 0, true, jv_OFFLINE);  // публикуем в топик LWT_TOPIC событие об отключении
+  vTaskDelay(pdMS_TO_TICKS(500));                                                            // задержка для публикации  
   ESP.restart();                                                                             // перезагружаемся  
 }
 
@@ -887,24 +888,31 @@ void onMqttMessage(char* topic, char* payload, AsyncMqttClientMessageProperties 
   if (strcmp(topic, curConfig.command_topic) == 0) {
     // разбираем MQTT сообщение и подготавливаем буфер с изменениями для формирования команд    
     // для этого получаем семафор обработки входного JSON документа
-    while ( xSemaphoreTake(sem_InputJSONdoc,(TickType_t) 10) != pdTRUE ) {
-      vTaskDelay(1/portTICK_PERIOD_MS);         
-    }
+    while ( xSemaphoreTake(sem_InputJSONdoc,(TickType_t) 10) != pdTRUE ) vTaskDelay(1/portTICK_PERIOD_MS);         
     DeserializationError err = deserializeJson(InputJSONdoc, messageTemp);                    // десерилизуем сообщение и взводим признак готовности к обработке
     if (err) {
       #ifdef DEBUG_LEVEL_PORT         
       Serial.print(F("Error of deserializeJson(): "));
       Serial.println(err.c_str());
       #endif
+      f_HasMQTTCommand = false;                                                              // сбрасываем флаг получения команды по MQTT
+      // далее проверяем, если это короткие сообщения - то сами достраиваем объект документ
+      if (strstr(payload,jc_CLR_CONFIG) != NULL ) {
+        InputJSONdoc[jc_CLR_CONFIG] = true;
+        f_HasMQTTCommand = true;                                                              
+      }  
+      if (strstr(payload,jc_RESET) != NULL ) {
+        InputJSONdoc[jc_RESET] = true;
+        f_HasMQTTCommand = true;                                                              
+      }  
+      if (strstr(payload,jc_REPORT) != NULL ) {
+        InputJSONdoc[jc_REPORT] = true;
+        f_HasMQTTCommand = true;                                                              
+      }  
+      if (!f_HasMQTTCommand) xSemaphoreGive ( sem_InputJSONdoc );                            // отдаем семафор, если MQTT обработки не будет
       }
-    else {  
-      // для коротких сообщений без ключей дополняем DOC объект
-      if (strstr(payload,jc_CLR_CONFIG) != NULL ) InputJSONdoc[jc_CLR_CONFIG] = true;
-      if (strstr(payload,jc_RESET) != NULL ) InputJSONdoc[jc_RESET] = true;
-      if (strstr(payload,jc_REPORT) != NULL ) InputJSONdoc[jc_REPORT] = true;
-      f_HasMQTTCommand = true;                            // взводим флаг получения команды по MQTT
-      // отдадим семафор обработки документа только после преобразования JSON документа в команды
-    }
+    else f_HasMQTTCommand = true;                                                            // взводим флаг получения команды по MQTT
+    // отдадим семафор обработки документа только после преобразования JSON документа в команды
   }
   #ifdef DEBUG_LEVEL_PORT         
   Serial.printf("Publish received.\n  topic: %s\n  message: [", topic);
