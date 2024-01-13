@@ -520,8 +520,6 @@ void cmdSwitchInput(const bool InpMode) { // команда переключен
     f_HasReportNow = true;                                                                   // взводим флаг отчёта об изменении состояния
     f_HasDataForSync = true;                                                                 // взводим флаг необходимости синхронизации
     curConfig.inp_selector = InpMode;                                                        // собственно переключаем вход
-    if (curConfig.inp_selector) digitalWrite(RELAY_SELECTOR_PIN, LOW);                       // подключаем вход RCA    
-      else digitalWrite(RELAY_SELECTOR_PIN, HIGH);                                           // подключаем вход XLR    
   }
 }
 
@@ -1349,9 +1347,10 @@ void applayChangesTask (void *pvParam) { // применяем изменени�
       digitalWrite(LED_POWER_GREEN_PIN,HIGH);
       digitalWrite(LED_POWER_RED_PIN,LOW);
       // отображаем селектор входов
-      digitalWrite(LED_SELECTOR_RCA_PIN,!curConfig.inp_selector);     // RCA = 0 - поэтому инверсия
-      digitalWrite(LED_SELECTOR_XLR_PIN,curConfig.inp_selector);      // XLR = 1 - прямая запись
-      } 
+      digitalWrite(LED_SELECTOR_RCA_PIN,!curConfig.inp_selector);                   // RCA = 0 - поэтому инверсия
+      digitalWrite(LED_SELECTOR_XLR_PIN,curConfig.inp_selector);                    // XLR = 1 - прямая запись
+      digitalWrite(RELAY_SELECTOR_PIN, curConfig.inp_selector);            // подключаем вход RCA/XLR    
+      }
     else {
       // отображаем индикацию выключения модуля
       digitalWrite(LED_POWER_GREEN_PIN,LOW);
