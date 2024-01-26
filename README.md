@@ -132,6 +132,5 @@
 ## Amplifiler control unit - Hardware part 
 
 Описание аппаратной части контролера изложено здесь:
-
-
+![20230317_091343](https://user-images.githubusercontent.com/80087552/225835447-27c02a59-03d8-4f5d-88e4-4ac7fa8e6db7.jpg)
 
