@@ -11,6 +11,11 @@
 
 <div align="center"><img alt="Overview" width="600" src="/images/3D_acu_pcb_view.png" />&emsp;&emsp;&emsp;</div>
 
+Собранная плата выглядит следующим образом:
+
+<div align="center"><img alt="Overview" width="600" src="/images/3D_assembled_view.png" />&emsp;&emsp;&emsp;</div>
+
+
 ## Модуль питания и основное силовое реле
 
 <div align="center"><img alt="Overview" width="800" src="/images/p&r_circuits_short.png" />&emsp;&emsp;&emsp;</div>
