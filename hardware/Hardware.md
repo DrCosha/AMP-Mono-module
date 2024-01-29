@@ -13,7 +13,7 @@
 
 Собранная плата выглядит следующим образом:
 
-<div align="center"><img alt="Overview" width="600" src="/images/3D_assembled_view.png" />&emsp;&emsp;&emsp;</div>
+<div align="center"><img alt="Overview" width="600" src="/images/acu_assembled_view.png" />&emsp;&emsp;&emsp;</div>
 
 
 ## Модуль питания и основное силовое реле
