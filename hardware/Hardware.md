@@ -11,4 +11,4 @@
 
 <div align="center"><img alt="Overview" width="800" src="/images/p&r_circuits_short.png" />&emsp;&emsp;&emsp;</div>
 
-Общее описание и настройки здесь: [README.md](https://github.com/DrCosha/AMP-Mono-module/README.md) 
+Общее описание и настройки здесь: [README.md](https://github.com/DrCosha/AMP-Mono-module/blob/master/README.md)
