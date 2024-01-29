@@ -11,6 +11,4 @@
 
 <div align="center"><img alt="Overview" width="800" src="/images/p&r_circuits_short.png" />&emsp;&emsp;&emsp;</div>
 
-    AMP-Mono-module/images/p&r_circuits_short.png
-
-Last but not least thank you for the implementation of MHI-AC-Ctrl in [different environments](https://github.com/DrCosha/AMP-Mono-module/Readme.md) (FHEM, Tasmota, Home Assistant etc.)
+Общее описание и настройки здесь: [README.md](https://github.com/DrCosha/AMP-Mono-module/Readme.md) 
