@@ -9,7 +9,7 @@
 
 Общий вид 3D модели платы:
 
-<div align="center"><img alt="Overview" width="800" src="/images/ACU_main_circuit_short.png" />&emsp;&emsp;&emsp;</div>
+<div align="center"><img alt="Overview" width="600" src="/images/3D_acu_pcb_view.png" />&emsp;&emsp;&emsp;</div>
 
 ## Модуль питания и основное силовое реле
 
