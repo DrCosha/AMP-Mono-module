@@ -13,4 +13,4 @@
 
     AMP-Mono-module/images/p&r_circuits_short.png
 
-Last but not least thank you for the implementation of MHI-AC-Ctrl in [different environments](https://github.com/DrCosha/AMP-Mono-module/images/p&r_circuits_short.png) (FHEM, Tasmota, Home Assistant etc.)
+Last but not least thank you for the implementation of MHI-AC-Ctrl in [different environments](https://github.com/DrCosha/AMP-Mono-module/Readme.md) (FHEM, Tasmota, Home Assistant etc.)
