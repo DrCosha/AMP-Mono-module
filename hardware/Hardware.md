@@ -13,7 +13,7 @@
 
 ## Схема плат индикации и включения и платы селектора и датчика освещенности
 
-<div align="center"><img alt="Overview" width="800" src="/images/selector_panel_short.png" />&emsp;&emsp;&emsp;</div>
-<div align="center"><img alt="Overview" width="800" src="/images/selector_panel_short.png" />&emsp;&emsp;&emsp;</div>
+<div align="center"><img alt="Overview" width="400" src="/images/power_panel_short.png" />&emsp;&emsp;&emsp;</div>
+<div align="center"><img alt="Overview" width="400" src="/images/selector_panel_short.png" />&emsp;&emsp;&emsp;</div>
 
 Общее описание и настройки здесь: [README.md](https://github.com/DrCosha/AMP-Mono-module/blob/master/README.md)
