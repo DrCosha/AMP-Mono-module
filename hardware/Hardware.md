@@ -9,7 +9,8 @@
 
 ## Схема модуля питания и основного силового реле
 
-<div align="center"><img alt="Overview" width="800" src="/images/ACU_main_circuit_short.png" />&emsp;&emsp;&emsp;</div>
+<div align="center"><img alt="Overview" width="800" src="/images/p&r_circuits_short.png" />&emsp;&emsp;&emsp;</div>
 
+    AMP-Mono-module/images/p&r_circuits_short.png
 
-Last but not least thank you for the implementation of MHI-AC-Ctrl in [different environments](https://github.com/absalom-muc/MHI-AC-Ctrl/blob/master/SW-Configuration.md#integration-examples) (FHEM, Tasmota, Home Assistant etc.)
+Last but not least thank you for the implementation of MHI-AC-Ctrl in [different environments](https://github.com/DrCosha/AMP-Mono-module/images/p&r_circuits_short.png) (FHEM, Tasmota, Home Assistant etc.)
