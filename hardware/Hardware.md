@@ -7,4 +7,9 @@
 
 <div align="center"><img alt="Overview" width="800" src="/images/ACU_main_circuit_short.png" />&emsp;&emsp;&emsp;</div>
 
+## Схема модуля питания и основного силового реле
+
+<div align="center"><img alt="Overview" width="800" src="/images/ACU_main_circuit_short.png" />&emsp;&emsp;&emsp;</div>
+
+
 Last but not least thank you for the implementation of MHI-AC-Ctrl in [different environments](https://github.com/absalom-muc/MHI-AC-Ctrl/blob/master/SW-Configuration.md#integration-examples) (FHEM, Tasmota, Home Assistant etc.)
