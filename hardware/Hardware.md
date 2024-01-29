@@ -7,6 +7,10 @@
 
 <div align="center"><img alt="Overview" width="800" src="/images/ACU_main_circuit_short.png" />&emsp;&emsp;&emsp;</div>
 
+Общий вид 3D модели платы:
+
+<div align="center"><img alt="Overview" width="800" src="/images/ACU_main_circuit_short.png" />&emsp;&emsp;&emsp;</div>
+
 ## Модуль питания и основное силовое реле
 
 <div align="center"><img alt="Overview" width="800" src="/images/p&r_circuits_short.png" />&emsp;&emsp;&emsp;</div>
@@ -14,6 +18,8 @@
 ## Схема платы индикации и включения, а так же платы селектора и датчика освещенности
 
 <div align="center"><img height="250" src="/images/power_panel_short.png"/>&emsp; <img height="250" src="/images/selector_panel_short.png"/></div>
+
+
 
 
 Общее описание и настройки здесь: [README.md](https://github.com/DrCosha/AMP-Mono-module/blob/master/README.md)
