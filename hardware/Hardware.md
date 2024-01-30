@@ -59,7 +59,7 @@
 
 <div align="center"><img height="250" src="/images/power_panel_short.png"/>&emsp; <img height="250" src="/images/selector_panel_short.png"/></div>
 
+<br/>
+<br/>
 
-
-
-Общее описание и настройки здесь: [README.md](https://github.com/DrCosha/AMP-Mono-module/blob/master/README.md)
+Общее описание программной части и настройки здесь: [README.md](https://github.com/DrCosha/AMP-Mono-module/blob/master/README.md)
