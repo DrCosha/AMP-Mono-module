@@ -45,7 +45,7 @@
 
 Общий вид 3D модели платы:
 
-<div align="center"><img alt="Overview" width="600" src="/images/3D_acu_pcb_view.png" />&emsp;&emsp;&emsp;</div>
+<div align="center"><img alt="Overview" width="600" src="/images/3D_p&r_pcb_view.png" />&emsp;&emsp;&emsp;</div>
 
 
 Основные сигналы модуля выведены на следующие разъемы:
