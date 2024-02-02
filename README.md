@@ -132,5 +132,5 @@
 
 Описание аппаратной части контролера изложено здесь:
 
-<a href="/hardware/Hardware.md"> __Hardware.md__ </a>
+<a href="/hardware/README.md"> __README.md (раздел hardware)__ </a>
 
