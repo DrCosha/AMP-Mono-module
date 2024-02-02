@@ -40,12 +40,16 @@
 ## Модуль standby питания и основное силовое реле
 
 <div align="center"><img alt="Overview" width="800" src="/images/p&r_circuits_short.png" />&emsp;&emsp;&emsp;</div>
+
 <br/>
 <br/>
 
 Общий вид 3D модели платы:
 
 <div align="center"><img alt="Overview" width="600" src="/images/3D_p&r_pcb_view.png" />&emsp;&emsp;&emsp;</div>
+
+<br/>
+<br/>
 
 
 Основные сигналы модуля выведены на следующие разъемы:
