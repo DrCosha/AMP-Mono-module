@@ -18,7 +18,7 @@
 <br/>
 <br/>
 
-Список элементов, примененных в схеме представлен в таблице ниже и файле [README.md](https://github.com/DrCosha/AMP-Mono-module/blob/master/README.md):
+Список элементов, примененных в схеме представлен в таблице ниже и файле [BOM_AMP CPU and power module_2024-01-10.csv](https://github.com/DrCosha/AMP-Mono-module/blob/master/hardware/BOM_AMP CPU and power module_2024-01-10.csv):
 
 |N |Значение|Номера элементов|Тип элемента|Количество|Производитель|
 |--|----|----------|---------|--------|-----------------|
