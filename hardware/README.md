@@ -123,7 +123,7 @@
 
 Общий вид трансформатора и его маркировка:
 
-<div align="center"><img alt="Overview" width="600" src="/images/PTC10_transformer.png" />&emsp;&emsp;&emsp;</div>
+<div align="center"><img alt="Overview" width="600" src="/images/PTC10-transformer.png" />&emsp;&emsp;&emsp;</div>
 
 <br/>
 
