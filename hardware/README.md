@@ -54,7 +54,7 @@
 <br/>
 <br/>
 
-Список элементов, примененных в схемах модуля CPU и платы его питания представлен в таблице ниже и файле [BOM AMP CPU & PM.csv](https://github.com/DrCosha/AMP-Mono-module/blob/master/hardware/BOM_AMP_CPU_&_PM.csv):
+Список элементов, примененных в схемах модуля CPU и платы его питания представлен в таблице ниже и файле [BOM AMP CPU & PM.csv](https://github.com/DrCosha/AMP-Mono-module/blob/master/hardware/BOM_AMP_CPU_&_PM_rev4.csv):
 
 |N |Значение|Номера элементов|Тип элемента|Количество|
 |--|----|----------|---------|--------|
