@@ -2,10 +2,14 @@
 ************************************************************************
 *         Firmware для управления моноблоком усилителя Hi-END Amp
 *                         (с) 2023-2024, by Dr@Cosha
-*                               ver 4.2
+*                               ver 4.3
 *                         hardware ver.6.0a
-************************************************************************
+************************************************************************/
 
+
+#define P_VERSIONS "SW=4.3 HW=6.0a"                   // версия прошивки и платы под которую она сделана
+
+/*
 Модуль управления моноблока получает команды от следующих устройств и блоков:
 
 Лицевая панель управления:
@@ -203,6 +207,8 @@ extern "C" {
 #define jk_LIGHT_MANUAL_SET  "light_manual"       // ключ описания массива значений PWM для ручной подсветки
 #define jk_LIGHT_AUTO_SET    "light_auto"         // ключ описания границ значений PWM для автоматической подсветки
 #define jk_AMBIENT_SET       "ambient_sens"       // ключ описания границ значений ambient сенсора
+#define jk_VERSIONS       "versions"              // ключ описания версий SW & HW для контроллера
+#define jk_IP             "ip"                    // ключ описания адреса контроллера в сети
 
 // --- значения ключей и команд ---
 #define jv_ONLINE         "online"                // 
@@ -351,6 +357,8 @@ SemaphoreHandle_t sem_InputOWBPacket = xSemaphoreCreateBinary();                
 
 // наименование 
 String ControllerName = "HiAMP_";                                                        // имя нашего контроллера
+// версии платы и софта
+String ControllerVersions = P_VERSIONS;                                                  // версии софта и платы
 
 // =============================== общие процедуры и функции ==================================
 
@@ -640,10 +648,11 @@ void handleRootPage() { // процедура генерации основно�
  function sp(i){eb(i).type=(eb(i).type==='text'?'password':'text');}function wl(f){window.addEventListener('load',f);}function jd(){var t=0,i=document.querySelectorAll('input,button,textarea,select'); 
  while(i.length>=t){ if(i[t]){i[t]['name']=(i[t].hasAttribute('id')&&(!i[t].hasAttribute('name')))?i[t]['id']:i[t]['name'];}t++;}} wl(jd); </script>)=====" + CSW_PAGE_STYLE +
  R"=====( </head><body> <div style="text-align:left;display:inline-block;color:#eaeaff;min-width:340px;"> <div style="text-align:center;color:#eaeaea;"> <noscript>To use this page, please enable JavaScript<br></noscript>
- <h3>Amplifier control module configuration</h3><h2>)=====";
-  out_http_text += ControllerName +
- R"=====(</h2></div><fieldset><legend><b>&nbsp;Network parameters&nbsp;</b></legend>
- <form method="get" action="applay"><p><b>WiFi SSID</b> [)=====";
+ <h3>Amplifier control module configuration</h3><hr><h2>)=====";
+  out_http_text += ControllerName + 
+ R"=====(</h2><hr><div style="text-align:right;font-size:11px;style="color:#aaa;">)=====";
+  out_http_text += ControllerVersions +
+ R"=====(</div></div><fieldset><legend><b>&nbsp;Network parameters&nbsp;</b></legend><form method="get" action="applay"><p><b>WiFi SSID</b> [)=====";
   tmpStr = String(curConfig.wifi_ssid);
   out_http_text += tmpStr +
  R"=====(]<br><input id="wn" placeholder=" " value=")=====";
@@ -1501,7 +1510,11 @@ void reportTask (void *pvParam) { // репортим о текущем сост
         // добавляем границы работы сенсора освещения
         OutputJSONdoc[jk_AMBIENT_SET][0] = curConfig._min_ambient_value;                     
         OutputJSONdoc[jk_AMBIENT_SET][1] = curConfig._max_ambient_value;                     
-        // серилизуем в строку
+        // добавляем информационные данные контроллера
+        OutputJSONdoc[jk_VERSIONS] = P_VERSIONS;                                                    // версии SW & HW
+        OutputJSONdoc[jk_IP] = WiFi.localIP().toString();                                           // адрес контроллера
+
+         // серилизуем в строку
         serializeJson(OutputJSONdoc, tmpPayload);
         // публикуем в топик P_STATE_TOPIC серилизованный json через буфер buffer
         char buffer2[ tmpPayload.length()+1 ];
