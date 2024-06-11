@@ -127,7 +127,7 @@
 
 **Вспомогательные данные и настройки**:
 ```
-{"vu_brightness":0,"ambient":1469,"trigger_in":"off","trigger_enable":"on","trigger_out":"off","bypass":"on","owb_sync":"on","light_manual":[65,80,500],"light_auto":[75,500],"ambient_sens":[0,1024],"versions":"SW=4.3 HW=6.0a","ip":"192.168.40.187"}
+{"vu_brightness":0,"ambient":169,"trigger_in":"off","trigger_enable":"on","trigger_out":"off","bypass":"on","owb_sync":"on","light_manual":[65,80,500],"light_auto":[75,500],"ambient_sens":[0,1024],"versions":"SW=4.3 HW=6.0a","ip":"192.168.40.187"}
 ```
 
 Данные в этом топике отчасти совпадают с настройками, которые можно задать через топик команд, отчасти содержат текущие данные модуля управления. Ниже приведена таблица с тегами и описанием по 
